@@ -1,0 +1,1252 @@
+﻿<!DOCTYPE html>
+<html lang="zh">
+
+<head>
+  <meta charset="UTF-8" />
+  <title>QQ频道自动化控制台</title>
+  <script src="https://unpkg.com/htmx.org@1.9.5"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    let uploaded_image_url = "";
+    let currentTaskId = null;
+    let currentPublicTaskId = null; // 当前发布任务的ID
+    let logEventSource = null; // SSE连接对象
+    let countdownElement = null; // 跟踪倒计时元素
+    let isGlobalMode = false; // 是否处于全局模式
+
+    // 添加日志到显示区域
+    function appendLog(message, level = "info") {
+      const logDiv = document.getElementById("log");
+
+      // 检查是否是倒计时消息
+      const isCountdown = message.includes("[COUNTDOWN]");
+
+      if (isCountdown) {
+        // 如果是倒计时，更新已有的倒计时行或创建新行
+        message = message.replace("[COUNTDOWN]", "").trim();
+
+        if (countdownElement) {
+          // 更新已有的倒计时行（不更新时间戳，只更新消息内容）
+          const timestampSpan = countdownElement.querySelector("span.text-gray-500");
+          const timestamp = timestampSpan ? timestampSpan.textContent : `[${new Date().toLocaleTimeString()}]`;
+          countdownElement.innerHTML = `<span class="text-gray-500">${timestamp}</span> <span class="text-blue-400">${escapeHtml(message)}</span>`;
+        } else {
+          // 创建新的倒计时行
+          const timestamp = new Date().toLocaleTimeString();
+          countdownElement = document.createElement("div");
+          countdownElement.id = "countdown-log";
+          countdownElement.className = `mb-1`;
+          countdownElement.innerHTML = `<span class="text-gray-500">[${timestamp}]</span> <span class="text-blue-400">${escapeHtml(message)}</span>`;
+          logDiv.appendChild(countdownElement);
+        }
+      } else {
+        // 如果不是倒计时，移除倒计时行（如果存在）
+        if (countdownElement) {
+          countdownElement.remove();
+          countdownElement = null;
+        }
+
+        // 正常添加新日志
+        const timestamp = new Date().toLocaleTimeString();
+        const logEntry = document.createElement("div");
+        logEntry.className = `mb-1`;
+
+        let color = "text-green-400"; // info
+        if (level === "error") color = "text-red-400";
+        else if (level === "warning") color = "text-yellow-400";
+
+        logEntry.innerHTML = `<span class="text-gray-500">[${timestamp}]</span> <span class="${color}">${escapeHtml(message)}</span>`;
+        logDiv.appendChild(logEntry);
+      }
+
+      // 自动滚动到底部
+      logDiv.scrollTop = logDiv.scrollHeight;
+    }
+
+    // HTML转义函数
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    // 初始化全局SSE连接（页面加载时调用）
+    function initGlobalLogStream() {
+      // 如果已经有连接，先关闭
+      if (logEventSource) {
+        logEventSource.close();
+        logEventSource = null;
+      }
+
+      // 创建全局SSE连接（不指定task_id）
+      const eventSource = new EventSource(`/qq/logs_stream`);
+      logEventSource = eventSource;
+      isGlobalMode = true;
+
+      // 设置消息处理器
+      setupSSEEventHandlers(eventSource);
+    }
+
+    // 设置SSE事件处理器（共用代码）
+    function setupSSEEventHandlers(eventSource) {
+
+      // 连接成功
+      eventSource.addEventListener('message', function (event) {
+        try {
+          const data = JSON.parse(event.data);
+
+          if (data.type === 'connected') {
+            console.log('SSE连接已建立:', data.message);
+            if (isGlobalMode) {
+              appendLog('SSE连接已建立（全局模式）', "info");
+            }
+          } else if (data.type === 'log') {
+            // 收到日志
+            const logEntry = data.data;
+            // 在全局模式下，如果日志属于当前任务，则忽略（避免重复显示）
+            // 因为任务特定连接会收到这些日志
+            if (isGlobalMode && currentTaskId && logEntry.task_id === currentTaskId) {
+              // 忽略属于当前任务的日志
+              return;
+            }
+            // 在全局模式下，日志可能包含task_id信息，但我们只显示消息
+            appendLog(logEntry.message, logEntry.level);
+
+            // 检测任务完成消息，自动更新UI
+            if (logEntry.message.includes("所有频道的点赞任务已完成") ||
+              logEntry.message.includes("所有频道的发布任务已完成") ||
+              logEntry.message.includes("所有频道的评论任务已完成") ||
+              logEntry.message.includes("所有频道的回复任务已完成")) {
+              // 任务完成，自动停止连接并更新UI
+              setTimeout(() => {
+                // 根据消息内容判断任务类型并更新对应的UI
+                if (logEntry.message.includes("所有频道的点赞任务已完成")) {
+                  // 更新点赞任务UI
+                  if (currentLikeTaskId) {
+                    document.getElementById("btn_like_start").style.display = "block";
+                    document.getElementById("btn_like_stop").style.display = "none";
+                    // 如果当前是点赞任务，停止日志轮询
+                    if (currentTaskId === currentLikeTaskId) {
+                      stopLogPolling();
+                    }
+                    currentLikeTaskId = null;
+                  }
+                } else if (logEntry.message.includes("所有频道的发布任务已完成")) {
+                  // 更新发布任务UI
+                  if (currentPublicTaskId) {
+                    document.getElementById("btn_publish").style.display = "block";
+                    document.getElementById("btn_stop").style.display = "none";
+                    // 如果当前是发布任务，停止日志轮询
+                    if (currentTaskId === currentPublicTaskId) {
+                      stopLogPolling();
+                    }
+                    currentPublicTaskId = null;
+                  }
+                } else if (logEntry.message.includes("所有频道的评论任务已完成")) {
+                  // 更新评论任务UI
+                  if (currentCommentTaskId) {
+                    document.getElementById("btn_comment_start").style.display = "block";
+                    document.getElementById("btn_comment_stop").style.display = "none";
+                    // 如果当前是评论任务，停止日志轮询
+                    if (currentTaskId === currentCommentTaskId) {
+                      stopLogPolling();
+                    }
+                    currentCommentTaskId = null;
+                  }
+                } else if (logEntry.message.includes("所有频道的回复任务已完成")) {
+                  // 更新回复任务UI
+                  if (currentReplyTaskId) {
+                    document.getElementById("btn_reply_start").style.display = "block";
+                    document.getElementById("btn_reply_stop").style.display = "none";
+                    // 如果当前是回复任务，停止日志轮询
+                    if (currentTaskId === currentReplyTaskId) {
+                      stopLogPolling();
+                    }
+                    currentReplyTaskId = null;
+                  }
+                }
+              }, 500); // 延迟500ms确保日志已显示
+            }
+          } else if (data.type === 'heartbeat') {
+            // 心跳消息，忽略
+            console.debug('SSE心跳');
+          } else if (data.type === 'end') {
+            // 日志流结束
+            appendLog(data.message || "日志流已结束", "info");
+            stopLogPolling();
+          } else if (data.type === 'timeout') {
+            // 连接超时
+            appendLog(data.message || "连接超时", "warning");
+            stopLogPolling();
+          } else if (data.type === 'error') {
+            // 发生错误
+            appendLog(`错误: ${data.message}`, "error");
+          }
+        } catch (error) {
+          console.error("解析SSE消息失败:", error, event.data);
+        }
+      });
+
+      // 监听错误事件
+      eventSource.addEventListener('error', function (event) {
+        console.error("SSE连接错误:", event);
+        // 如果连接已关闭，尝试重新连接
+        if (eventSource.readyState === EventSource.CLOSED) {
+          appendLog("SSE连接已断开", "warning");
+          stopLogPolling();
+        }
+      });
+
+      // 监听open事件
+      eventSource.addEventListener('open', function (event) {
+        console.log('SSE连接已打开');
+      });
+    }
+
+    // 开始SSE连接接收日志（切换到任务特定模式）
+    function startLogPolling(taskId) {
+      currentTaskId = taskId;
+      countdownElement = null; // 重置倒计时元素
+
+      // 关闭之前的SSE连接
+      if (logEventSource) {
+        logEventSource.close();
+        logEventSource = null;
+      }
+
+      // 创建任务特定的SSE连接
+      const eventSource = new EventSource(`/qq/logs_stream?task_id=${taskId}`);
+      logEventSource = eventSource;
+      isGlobalMode = false;
+
+      // 设置消息处理器
+      setupSSEEventHandlers(eventSource);
+    }
+
+    // 停止SSE连接
+    function stopLogPolling() {
+      const wasInTaskMode = !isGlobalMode; // 保存当前状态
+
+      if (logEventSource) {
+        logEventSource.close();
+        logEventSource = null;
+      }
+      currentTaskId = null;
+      isGlobalMode = false;
+
+      // 如果是在任务模式下停止，切换回全局模式
+      if (wasInTaskMode) {
+        // 延迟一下再重新建立全局连接，避免立即断开连接
+        setTimeout(() => {
+          initGlobalLogStream();
+        }, 100);
+      }
+    }
+
+    // 获取选中的频道列表
+    function getSelectedChannels() {
+      const selectedChannels = [];
+      const checkboxes = document.querySelectorAll('tbody input.row-checkbox:checked');
+      checkboxes.forEach(checkbox => {
+        const row = checkbox.closest('tr');
+        const rowIndex = parseInt(row.dataset.index);
+        if (channelTableData[rowIndex]) {
+          selectedChannels.push({
+            name: channelTableData[rowIndex].channelName,
+            content: channelTableData[rowIndex].publishContent || '',
+            image: channelTableData[rowIndex].publishImage || '',
+            likeProbability: channelTableData[rowIndex].likeProbability || '' // 表格中设置的点赞概率
+          });
+        }
+      });
+      return selectedChannels;
+    }
+
+    function doPublic() {
+      const selectedChannels = getSelectedChannels();
+      if (selectedChannels.length === 0) {
+        appendLog("请至少选择一个频道", "error");
+        return;
+      }
+
+      // 检查是否有发布内容
+      const hasContent = selectedChannels.some(ch => ch.content.trim() !== '');
+      if (!hasContent) {
+        appendLog("请至少在一个频道中填写发布内容", "error");
+        return;
+      }
+
+      // 获取浏览器ID
+      const browser_id = document.getElementById("browser_id").value.trim();
+      if (!browser_id) {
+        appendLog("请输入浏览器ID", "error");
+        return;
+      }
+
+      // 清空之前的日志
+      document.getElementById("log").innerHTML = "";
+      appendLog("开始发布帖子...", "info");
+
+      const wait_time_min = parseFloat(document.getElementById("publish_wait_time_min").value) || 3;
+      const wait_time_max = parseFloat(document.getElementById("publish_wait_time_max").value) || 8;
+      const check_first_page = document.getElementById("publish_check_first_page").checked;
+
+      fetch("/qq/do_public", {
+        method: "POST",
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          channels: selectedChannels,
+          wait_time_min: wait_time_min,
+          wait_time_max: wait_time_max,
+          check_first_page: check_first_page,
+          browser_id: browser_id,
+        })
+      })
+        .then((response) => response.json())
+        .then((data) => {
+          if (data.task_id) {
+            currentPublicTaskId = data.task_id;
+            startLogPolling(data.task_id);
+            // 显示控制按钮
+            document.getElementById("btn_publish").style.display = "none";
+            document.getElementById("btn_stop").style.display = "block";
+          }
+          appendLog(data.result, data.code === 200 ? "info" : "error");
+        })
+        .catch((error) => {
+          appendLog(`请求失败: ${error.message}`, "error");
+        });
+    }
+
+    // 暂停任务
+    function pauseTask() {
+      if (!currentPublicTaskId) {
+        appendLog("没有正在运行的任务", "error");
+        return;
+      }
+      fetch("/qq/control_task", {
+        method: "POST",
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          task_id: currentPublicTaskId,
+          action: "pause"
+        })
+      })
+        .then((response) => response.json())
+        .then((data) => {
+          if (data.code === 200) {
+            document.getElementById("btn_pause").style.display = "none";
+            document.getElementById("btn_resume").style.display = "inline-block";
+          }
+          appendLog(data.result, data.code === 200 ? "warning" : "error");
+        })
+        .catch((error) => {
+          appendLog(`暂停任务失败: ${error.message}`, "error");
+        });
+    }
+
+    // 恢复任务
+    function resumeTask() {
+      if (!currentPublicTaskId) {
+        appendLog("没有暂停的任务", "error");
+        return;
+      }
+      fetch("/qq/control_task", {
+        method: "POST",
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          task_id: currentPublicTaskId,
+          action: "resume"
+        })
+      })
+        .then((response) => response.json())
+        .then((data) => {
+          if (data.code === 200) {
+            document.getElementById("btn_pause").style.display = "inline-block";
+            document.getElementById("btn_resume").style.display = "none";
+          }
+          appendLog(data.result, data.code === 200 ? "info" : "error");
+        })
+        .catch((error) => {
+          appendLog(`恢复任务失败: ${error.message}`, "error");
+        });
+    }
+
+    // 停止任务
+    function stopTask() {
+      if (!currentPublicTaskId) {
+        appendLog("没有正在运行的任务", "error");
+        return;
+      }
+      fetch("/qq/control_task", {
+        method: "POST",
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          task_id: currentPublicTaskId,
+          action: "stop"
+        })
+      })
+        .then((response) => response.json())
+        .then((data) => {
+          // 隐藏所有控制按钮，显示发布按钮
+          document.getElementById("btn_publish").style.display = "block";
+          document.getElementById("btn_stop").style.display = "none";
+          currentPublicTaskId = null;
+          appendLog(data.result, data.code === 200 ? "warning" : "error");
+        })
+        .catch((error) => {
+          appendLog(`停止任务失败: ${error.message}`, "error");
+        });
+    }
+
+    // 点赞帖子
+    let currentLikeTaskId = null;
+    function doLike() {
+      const selectedChannels = getSelectedChannels();
+      if (selectedChannels.length === 0) {
+        appendLog("请至少选择一个频道", "error");
+        return;
+      }
+
+      // 获取浏览器ID
+      const browser_id = document.getElementById("browser_id").value.trim();
+      if (!browser_id) {
+        appendLog("请输入浏览器ID", "error");
+        return;
+      }
+
+      // 清空之前的日志
+      document.getElementById("log").innerHTML = "";
+
+      // 全局默认配置
+      const global_like_probability = parseFloat(document.getElementById("like_probability").value) || 0.8;
+      const post_match = document.getElementById("like_post_match").value || '';
+      const time_limit = parseInt(document.getElementById("like_time_limit").value) || 0;
+      const comment_count = parseInt(document.getElementById("like_comment_count").value) || 0;
+      const like_count = parseInt(document.getElementById("like_like_count").value) || 0;
+      const post_count = parseInt(document.getElementById("like_post_count").value) || 50;
+      const like_interval_min = parseFloat(document.getElementById("like_interval_min").value) || 10;
+      const like_interval_max = parseFloat(document.getElementById("like_interval_max").value) || 30;
+      const browse_mode = document.getElementById("like_browse_mode").value || 'new_post';
+
+      // 构建频道配置列表，每个频道使用表格中的点赞概率（如果设置了），否则使用全局设置
+      const channelsConfig = selectedChannels.map(ch => ({
+        name: ch.name,
+        like_probability: ch.likeProbability && ch.likeProbability.trim() !== ''
+          ? parseFloat(ch.likeProbability)
+          : global_like_probability,
+        post_match: post_match,
+        time_limit: time_limit,
+        comment_count: comment_count,
+        like_count: like_count,
+        post_count: post_count,
+        like_interval_min: like_interval_min,
+        like_interval_max: like_interval_max,
+        browse_mode: browse_mode,
+      }));
+
+      fetch("/qq/do_like", {
+        method: "POST",
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          channels: channelsConfig,
+          browser_id: browser_id,
+        })
+      })
+        .then((response) => response.json())
+        .then((data) => {
+          if (data.task_id) {
+            currentLikeTaskId = data.task_id;
+            startLogPolling(data.task_id);
+            document.getElementById("btn_like_start").style.display = "none";
+            document.getElementById("btn_like_stop").style.display = "block";
+          }
+          appendLog(data.result, data.code === 200 ? "info" : "error");
+        })
+        .catch((error) => {
+          appendLog(`请求失败: ${error.message}`, "error");
+        });
+    }
+
+    function stopLikeTask() {
+      if (!currentLikeTaskId) {
+        appendLog("没有正在运行的点赞任务", "error");
+        return;
+      }
+      fetch("/qq/control_task", {
+        method: "POST",
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          task_id: currentLikeTaskId,
+          action: "stop"
+        })
+      })
+        .then((response) => response.json())
+        .then((data) => {
+          document.getElementById("btn_like_start").style.display = "block";
+          document.getElementById("btn_like_stop").style.display = "none";
+          currentLikeTaskId = null;
+          appendLog(data.result, data.code === 200 ? "warning" : "error");
+        })
+        .catch((error) => {
+          appendLog(`停止点赞任务失败: ${error.message}`, "error");
+        });
+    }
+
+    // 评论帖子
+    let currentCommentTaskId = null;
+    function doComment() {
+      const selectedChannels = getSelectedChannels();
+      if (selectedChannels.length === 0) {
+        appendLog("请至少选择一个频道", "error");
+        return;
+      }
+
+      const comment_content = document.getElementById("comment_content").value || '';
+      if (!comment_content.trim()) {
+        appendLog("请输入评论内容", "error");
+        return;
+      }
+
+      // 获取浏览器ID
+      const browser_id = document.getElementById("browser_id").value.trim();
+      if (!browser_id) {
+        appendLog("请输入浏览器ID", "error");
+        return;
+      }
+
+      // 清空之前的日志
+      document.getElementById("log").innerHTML = "";
+      appendLog("开始评论任务...", "info");
+
+      // 收集所有参数
+      const post_match = document.getElementById("comment_post_match").value || '';
+      const comment_probability = parseFloat(document.getElementById("comment_probability").value) || 0.8;
+      const time_limit = parseInt(document.getElementById("comment_time_limit").value) || 0;
+      const comment_count = parseInt(document.getElementById("comment_comment_count").value) || 0;
+      const like_count = parseInt(document.getElementById("comment_like_count").value) || 0;
+      const share_count = parseInt(document.getElementById("comment_share_count").value) || 0;
+      const post_count = parseInt(document.getElementById("comment_post_count").value) || 50;
+      const comment_interval_min = parseFloat(document.getElementById("comment_interval_min").value) || 10;
+      const comment_interval_max = parseFloat(document.getElementById("comment_interval_max").value) || 30;
+      const browse_mode = document.getElementById("comment_browse_mode").value || 'new_post';
+      const publisher_name = document.getElementById("comment_publisher_name").value || '';
+
+      const channelNames = selectedChannels.map(ch => ch.name);
+
+      fetch("/qq/do_comment", {
+        method: "POST",
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          channels: channelNames,
+          post_match: post_match,
+          comment_content: comment_content,
+          comment_probability: comment_probability,
+          time_limit: time_limit,
+          comment_count: comment_count,
+          like_count: like_count,
+          share_count: share_count,
+          post_count: post_count,
+          comment_interval_min: comment_interval_min,
+          comment_interval_max: comment_interval_max,
+          browse_mode: browse_mode,
+          publisher_name: publisher_name,
+          browser_id: browser_id,
+        })
+      })
+        .then((response) => response.json())
+        .then((data) => {
+          if (data.task_id) {
+            currentCommentTaskId = data.task_id;
+            startLogPolling(data.task_id);
+            document.getElementById("btn_comment_start").style.display = "none";
+            document.getElementById("btn_comment_stop").style.display = "block";
+          }
+          appendLog(data.result, data.code === 200 ? "info" : "error");
+        })
+        .catch((error) => {
+          appendLog(`请求失败: ${error.message}`, "error");
+        });
+    }
+
+    function stopCommentTask() {
+      if (!currentCommentTaskId) {
+        appendLog("没有正在运行的评论任务", "error");
+        return;
+      }
+      fetch("/qq/control_task", {
+        method: "POST",
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          task_id: currentCommentTaskId,
+          action: "stop"
+        })
+      })
+        .then((response) => response.json())
+        .then((data) => {
+          document.getElementById("btn_comment_start").style.display = "block";
+          document.getElementById("btn_comment_stop").style.display = "none";
+          currentCommentTaskId = null;
+          appendLog(data.result, data.code === 200 ? "warning" : "error");
+        })
+        .catch((error) => {
+          appendLog(`停止评论任务失败: ${error.message}`, "error");
+        });
+    }
+
+    // 回复帖子
+    let currentReplyTaskId = null;
+    function doReply() {
+      const selectedChannels = getSelectedChannels();
+      if (selectedChannels.length === 0) {
+        appendLog("请至少选择一个频道", "error");
+        return;
+      }
+
+      const post_match = document.getElementById("reply_post_match").value || '';
+      const comment_match = document.getElementById("reply_comment_match").value || '';
+      const reply_content = document.getElementById("reply_content").value || '';
+
+      if (!reply_content.trim()) {
+        appendLog("请输入回复内容", "error");
+        return;
+      }
+
+      // 获取浏览器ID
+      const browser_id = document.getElementById("browser_id").value.trim();
+      if (!browser_id) {
+        appendLog("请输入浏览器ID", "error");
+        return;
+      }
+
+      // 清空之前的日志
+      document.getElementById("log").innerHTML = "";
+      appendLog("开始回复任务...", "info");
+
+      const channelNames = selectedChannels.map(ch => ch.name);
+
+      fetch("/qq/do_reply", {
+        method: "POST",
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          channels: channelNames,
+          post_match: post_match,
+          comment_match: comment_match,
+          reply_content: reply_content,
+          browser_id: browser_id,
+        })
+      })
+        .then((response) => response.json())
+        .then((data) => {
+          if (data.task_id) {
+            currentReplyTaskId = data.task_id;
+            startLogPolling(data.task_id);
+            document.getElementById("btn_reply_start").style.display = "none";
+            document.getElementById("btn_reply_stop").style.display = "block";
+          }
+          appendLog(data.result, data.code === 200 ? "info" : "error");
+        })
+        .catch((error) => {
+          appendLog(`请求失败: ${error.message}`, "error");
+        });
+    }
+
+    function stopReplyTask() {
+      if (!currentReplyTaskId) {
+        appendLog("没有正在运行的回复任务", "error");
+        return;
+      }
+      fetch("/qq/control_task", {
+        method: "POST",
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          task_id: currentReplyTaskId,
+          action: "stop"
+        })
+      })
+        .then((response) => response.json())
+        .then((data) => {
+          document.getElementById("btn_reply_start").style.display = "block";
+          document.getElementById("btn_reply_stop").style.display = "none";
+          currentReplyTaskId = null;
+          appendLog(data.result, data.code === 200 ? "warning" : "error");
+        })
+        .catch((error) => {
+          appendLog(`停止回复任务失败: ${error.message}`, "error");
+        });
+    }
+
+    // 页面卸载时停止SSE连接
+    window.addEventListener("beforeunload", () => {
+      stopLogPolling();
+    });
+
+    // 获取用户名称
+    function getUserName() {
+      // 获取浏览器ID
+      const browser_id = document.getElementById("browser_id").value.trim();
+      if (!browser_id) {
+        console.warn("浏览器ID未设置，跳过获取用户名称");
+        return;
+      }
+
+      console.log("开始获取用户名称...");
+      appendLog("正在获取用户名称...", "info");
+
+      fetch('/qq/user_name', {
+        method: "POST",
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          browser_id: browser_id
+        })
+      })
+        .then(res => res.json())
+        .then(data => {
+          console.log("获取用户名称响应:", data);
+          if (data.code === 200 && data.result) {
+            // 将获取的用户名填充到评论功能的发布者名称输入框
+            const publisherNameInput = document.getElementById("comment_publisher_name");
+            console.log("找到输入框:", publisherNameInput);
+            if (publisherNameInput) {
+              const userName = data.result.trim();
+              publisherNameInput.value = userName;
+              console.log("已设置用户名:", userName);
+              appendLog(`已自动填充发布者名称: ${userName}`, "info");
+            } else {
+              console.error("未找到发布者名称输入框 (#comment_publisher_name)");
+              appendLog("错误：未找到发布者名称输入框", "error");
+            }
+          } else {
+            console.warn("获取用户名称失败:", data);
+            appendLog(`获取用户名称失败: ${data.result || '未知错误'}`, "warning");
+          }
+        })
+        .catch(err => {
+          console.error("请求用户名称失败:", err);
+          appendLog(`请求用户名称失败: ${err.message}`, "error");
+        });
+    }
+
+    // 页面加载时初始化全局SSE连接
+    document.addEventListener("DOMContentLoaded", () => {
+      initGlobalLogStream();
+      // 用户名称将在加载频道列表后自动获取
+    });
+
+  </script>
+</head>
+
+<body class="bg-gray-100 p-6 h-screen flex flex-col">
+  <h1 class="text-2xl font-bold mb-4 text-center">QQ频道自动化控制台</h1>
+
+  <!-- 左边是功能操作区域，右边是日志输出区域，中间有间隔，操作区域无论多高，日志区域高度都只是占满整个屏幕 -->
+  <div class="flex flex-1 gap-4">
+    <!-- 操作区域 -->
+    <div class="w-4/5">
+      <!-- 浏览器ID配置区域 -->
+      <div class="p-4 bg-white rounded-xl shadow mb-6">
+        <h2 class="text-xl font-semibold mb-3">浏览器配置</h2>
+        <div class="flex items-center gap-4">
+          <label class="text-sm text-gray-700 font-medium whitespace-nowrap">浏览器ID:</label>
+          <input type="text" id="browser_id" placeholder="请输入浏览器ID" 
+            class="border p-2 rounded flex-1 text-sm" value="77eae086c94e44b687e54dd1234e7282" />
+          <button class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 text-sm whitespace-nowrap" 
+            onclick="getUserName()">
+            测试获取用户名
+          </button>
+          <span class="text-xs text-gray-500">请从指纹浏览器中获取浏览器ID并填写在此处</span>
+        </div>
+      </div>
+
+      <!-- 加载已加入频道列表 -->
+      <div class="p-4 bg-white rounded-xl shadow mb-6">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-xl font-semibold">已加入频道</h2>
+          <div class="flex items-center gap-2">
+            <button class="bg-purple-500 text-white px-4 py-2 rounded hover:bg-purple-600" onclick="loadJoinedList()">
+              加载
+            </button>
+            <span id="joined_loading" class="text-sm text-gray-500" style="display:none;">加载中...</span>
+          </div>
+        </div>
+        <div id="joined_list" class="border rounded max-h-[600px] overflow-auto text-sm text-gray-800 bg-gray-50">
+          <div id="joined_table_container" style="min-width: 100%; padding: 12px 12px 12px 12px;">
+            点击上方按钮加载频道列表
+          </div>
+        </div>
+      </div>
+
+      <!-- 功能操作区域，四个功能在一行，从上到下分别是标题，各种配置项，开始执行，停止 -->
+      <div class="p-4 bg-white rounded-xl shadow mb-6">
+        <h2 class="text-xl font-semibold mb-4">功能操作</h2>
+        <div class="grid grid-cols-4 gap-4">
+          <!-- 发布帖子功能 -->
+          <div class="border rounded-lg p-4 bg-gray-50">
+            <h4 class="text-lg font-semibold mb-3 text-center">发布帖子</h4>
+            <div class="space-y-3">
+              <!-- 操作间隔时间 -->
+              <div>
+                <label class="text-sm text-gray-600 mb-1 block">操作间隔时间（秒）</label>
+                <div class="flex items-center gap-2">
+                  <input type="number" id="publish_wait_time_min" placeholder="最小值"
+                    class="border p-2 w-full rounded text-sm" value="3" min="0" />
+                  <span class="text-gray-600">~</span>
+                  <input type="number" id="publish_wait_time_max" placeholder="最大值"
+                    class="border p-2 w-full rounded text-sm" value="8" min="0" />
+                </div>
+              </div>
+              <!-- 检测第一页是否发布过 -->
+              <div>
+                <label class="flex items-center gap-2 text-sm text-gray-700">
+                  <input type="checkbox" id="publish_check_first_page" class="w-4 h-4" checked />
+                  <span>检测第一页是否发布过</span>
+                </label>
+              </div>
+            </div>
+            <div class="mt-4 space-y-2">
+              <button class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 cursor-pointer w-full text-sm"
+                onclick="doPublic()" id="btn_publish">
+                开始执行
+              </button>
+              <button class="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600 cursor-pointer w-full text-sm"
+                onclick="stopTask()" id="btn_stop" style="display:none;">
+                停止
+              </button>
+            </div>
+          </div>
+
+          <!-- 点赞帖子功能 -->
+          <div class="border rounded-lg p-4 bg-gray-50">
+            <h4 class="text-lg font-semibold mb-3 text-center">点赞帖子</h4>
+            <div class="space-y-3">
+              <!-- 浏览方式 -->
+              <div>
+                <label class="text-sm text-gray-600 mb-1 block">浏览方式</label>
+                <select id="like_browse_mode" class="border p-2 w-full rounded text-sm">
+                  <option value="new_post" selected>新发表</option>
+                  <option value="new_reply">新回复</option>
+                  <option value="hot">热门</option>
+                </select>
+              </div>
+              <!-- 点赞概率 -->
+              <div>
+                <label class="text-sm text-gray-600 mb-1 block">点赞概率（全局默认）</label>
+                <input type="number" id="like_probability" placeholder="0~1" step="0.1"
+                  class="border p-2 w-full rounded text-sm" value="0.8" min="0" max="1" />
+              </div>
+              <!-- 帖子内容匹配关键词 -->
+              <div>
+                <label class="text-sm text-gray-600 mb-1 block">帖子内容匹配关键词</label>
+                <input type="text" id="like_post_match" placeholder="关键词，多个用逗号分隔"
+                  class="border p-2 w-full rounded text-sm" />
+              </div>
+              <!-- 时间限制 -->
+              <div>
+                <label class="text-sm text-gray-600 mb-1 block">时间限制（小时，0=不限制）</label>
+                <input type="number" id="like_time_limit" placeholder="x小时内，0表示不限制"
+                  class="border p-2 w-full rounded text-sm" value="0" min="0" />
+              </div>
+              <!-- 评论数 -->
+              <div>
+                <label class="text-sm text-gray-600 mb-1 block">评论数（超过x个，0=无要求）</label>
+                <input type="number" id="like_comment_count" placeholder="评论数阈值"
+                  class="border p-2 w-full rounded text-sm" value="0" min="0" />
+              </div>
+              <!-- 点赞数 -->
+              <div>
+                <label class="text-sm text-gray-600 mb-1 block">点赞数（超过x个，0=无要求）</label>
+                <input type="number" id="like_like_count" placeholder="点赞数阈值" class="border p-2 w-full rounded text-sm"
+                  value="0" min="0" />
+              </div>
+              <!-- 浏览帖子数量 -->
+              <div>
+                <label class="text-sm text-gray-600 mb-1 block">浏览帖子数量（0=不限制）</label>
+                <input type="number" id="like_post_count" placeholder="浏览帖子数量" class="border p-2 w-full rounded text-sm"
+                  value="50" min="0" />
+              </div>
+              <!-- 点赞间隔时间 -->
+              <div>
+                <label class="text-sm text-gray-600 mb-1 block">点赞间隔时间（秒）</label>
+                <div class="flex items-center gap-2">
+                  <input type="number" id="like_interval_min" placeholder="最小值"
+                    class="border p-2 w-full rounded text-sm" value="10" min="0" step="0.1" />
+                  <span class="text-gray-600">~</span>
+                  <input type="number" id="like_interval_max" placeholder="最大值"
+                    class="border p-2 w-full rounded text-sm" value="30" min="0" step="0.1" />
+                </div>
+              </div>
+            </div>
+            <div class="mt-4 space-y-2">
+              <button class="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 cursor-pointer w-full text-sm"
+                onclick="doLike()" id="btn_like_start">
+                开始执行
+              </button>
+              <button class="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600 cursor-pointer w-full text-sm"
+                onclick="stopLikeTask()" id="btn_like_stop" style="display:none;">
+                停止
+              </button>
+            </div>
+          </div>
+
+          <!-- 评论帖子功能 -->
+          <div class="border rounded-lg p-4 bg-gray-50">
+            <h4 class="text-lg font-semibold mb-3 text-center">评论帖子</h4>
+            <div class="space-y-3">
+              <!-- 浏览方式 -->
+              <div>
+                <label class="text-sm text-gray-600 mb-1 block">浏览方式</label>
+                <select id="comment_browse_mode" class="border p-2 w-full rounded text-sm">
+                  <option value="new_post" selected>新发表</option>
+                  <option value="new_reply">新回复</option>
+                  <option value="hot">热门</option>
+                </select>
+              </div>
+              <!-- 评论概率 -->
+              <div>
+                <label class="text-sm text-gray-600 mb-1 block">评论概率</label>
+                <input type="number" id="comment_probability" placeholder="0~1" step="0.1"
+                  class="border p-2 w-full rounded text-sm" value="0.8" min="0" max="1" />
+              </div>
+              <!-- 帖子内容匹配关键词 -->
+              <div>
+                <label class="text-sm text-gray-600 mb-1 block">帖子内容匹配关键词</label>
+                <input type="text" id="comment_post_match" placeholder="关键词，多个用逗号分隔"
+                  class="border p-2 w-full rounded text-sm" />
+              </div>
+              <!-- 时间限制 -->
+              <div>
+                <label class="text-sm text-gray-600 mb-1 block">时间限制（小时，0=不限制）</label>
+                <input type="number" id="comment_time_limit" placeholder="x小时内，0表示不限制"
+                  class="border p-2 w-full rounded text-sm" value="0" min="0" />
+              </div>
+              <!-- 点赞数 -->
+              <div>
+                <label class="text-sm text-gray-600 mb-1 block">点赞数（超过x个，0=无要求）</label>
+                <input type="number" id="comment_like_count" placeholder="点赞数阈值"
+                  class="border p-2 w-full rounded text-sm" value="0" min="0" />
+              </div>
+              <!-- 评论数 -->
+              <div>
+                <label class="text-sm text-gray-600 mb-1 block">评论数（超过x个，0=无要求）</label>
+                <input type="number" id="comment_comment_count" placeholder="评论数阈值"
+                  class="border p-2 w-full rounded text-sm" value="0" min="0" />
+              </div>
+              <!-- 分享数 -->
+              <div>
+                <label class="text-sm text-gray-600 mb-1 block">分享数（超过x个，0=无要求）</label>
+                <input type="number" id="comment_share_count" placeholder="分享数阈值"
+                  class="border p-2 w-full rounded text-sm" value="0" min="0" />
+              </div>
+              <!-- 浏览帖子数量 -->
+              <div>
+                <label class="text-sm text-gray-600 mb-1 block">浏览帖子数量（0=不限制）</label>
+                <input type="number" id="comment_post_count" placeholder="浏览帖子数量"
+                  class="border p-2 w-full rounded text-sm" value="50" min="0" />
+              </div>
+              <!-- 评论间隔时间 -->
+              <div>
+                <label class="text-sm text-gray-600 mb-1 block">评论间隔时间（秒）</label>
+                <div class="flex items-center gap-2">
+                  <input type="number" id="comment_interval_min" placeholder="最小值"
+                    class="border p-2 w-full rounded text-sm" value="10" min="0" step="0.1" />
+                  <span class="text-gray-600">~</span>
+                  <input type="number" id="comment_interval_max" placeholder="最大值"
+                    class="border p-2 w-full rounded text-sm" value="30" min="0" step="0.1" />
+                </div>
+              </div>
+              <!-- 发布者名称 -->
+              <div>
+                <label class="text-sm text-gray-600 mb-1 block">发布者名称（用于检查是否已评论）</label>
+                <input type="text" id="comment_publisher_name" placeholder="发布者名称"
+                  class="border p-2 w-full rounded text-sm" value="" />
+              </div>
+              <!-- 评论内容 -->
+              <div>
+                <label class="text-sm text-gray-600 mb-1 block">评论内容（多个用#分隔，随机选择）</label>
+                <textarea id="comment_content" placeholder="评论内容，多个用#分隔，例如：评论1#评论2#评论3" rows="3"
+                  class="border p-2 w-full rounded text-sm resize-none">🔥#✨️#💤</textarea>
+              </div>
+            </div>
+            <div class="mt-4 space-y-2">
+              <button class="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 cursor-pointer w-full text-sm"
+                onclick="doComment()" id="btn_comment_start">
+                开始执行
+              </button>
+              <button class="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600 cursor-pointer w-full text-sm"
+                onclick="stopCommentTask()" id="btn_comment_stop" style="display:none;">
+                停止
+              </button>
+            </div>
+          </div>
+
+          <!-- 回复帖子功能 -->
+          <div class="border rounded-lg p-4 bg-gray-50">
+            <h4 class="text-lg font-semibold mb-3 text-center">回复帖子</h4>
+            <div class="space-y-3">
+              <!-- 帖子内容匹配关键词 -->
+              <div>
+                <label class="text-sm text-gray-600 mb-1 block">帖子内容匹配关键词</label>
+                <input type="text" id="reply_post_match" placeholder="关键词，多个用逗号分隔"
+                  class="border p-2 w-full rounded text-sm" />
+              </div>
+              <!-- 评论内容匹配关键词 -->
+              <div>
+                <label class="text-sm text-gray-600 mb-1 block">评论内容匹配关键词</label>
+                <input type="text" id="reply_comment_match" placeholder="关键词，多个用逗号分隔"
+                  class="border p-2 w-full rounded text-sm" />
+              </div>
+              <!-- 回复内容 -->
+              <div>
+                <label class="text-sm text-gray-600 mb-1 block">回复内容</label>
+                <textarea id="reply_content" placeholder="回复内容" rows="3"
+                  class="border p-2 w-full rounded text-sm resize-none"></textarea>
+              </div>
+            </div>
+            <div class="mt-4 space-y-2">
+              <button class="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 cursor-pointer w-full text-sm"
+                onclick="doReply()" id="btn_reply_start">
+                开始执行
+              </button>
+              <button class="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600 cursor-pointer w-full text-sm"
+                onclick="stopReplyTask()" id="btn_reply_stop" style="display:none;">
+                停止
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 日志输出区域 -->
+    <div class="w-1/5 flex-shrink-0">
+      <!-- 日志输出 -->
+      <div id="log"
+        class="bg-black text-green-400 p-3 rounded-lg overflow-y-auto font-mono text-sm overflow-x-hidden sticky top-6"
+        style="height: calc(100vh - 120px); max-height: calc(100vh - 120px);">
+        日志输出区域...
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // 存储频道表格数据
+    let channelTableData = [];
+
+    // 全选/取消全选
+    function toggleSelectAll(checkbox) {
+      const checkboxes = document.querySelectorAll('tbody input[type="checkbox"]');
+      checkboxes.forEach(cb => cb.checked = checkbox.checked);
+    }
+
+    // 创建表格
+    function createChannelTable(channels) {
+      const container = document.getElementById("joined_table_container");
+      container.innerHTML = "";
+
+      if (channels.length === 0) {
+        container.textContent = "未找到已加入的频道";
+        return;
+      }
+
+      // 创建表格
+      const table = document.createElement('table');
+      table.className = 'w-full border-collapse';
+      table.style.fontSize = '14px';
+      table.style.minWidth = '1200px'; // 确保表格有足够宽度显示所有列
+
+      // 创建表头
+      const thead = document.createElement('thead');
+      thead.style.position = 'sticky';
+      thead.style.top = '0';
+      thead.style.zIndex = '20';
+      thead.style.backgroundColor = '#e5e7eb';
+      const headerRow = document.createElement('tr');
+
+      const headers = [
+        { text: '', width: '30px', class: 'select-all' },
+        { text: '序号', width: '50px' },
+        { text: '频道名称', width: '200px' },
+        { text: '发布内容', width: '150px' },
+        { text: '发布图片', width: '120px' },
+        { text: '帖子匹配', width: '100px' },
+        { text: '点赞概率', width: '80px' },
+        { text: '评论内容', width: '150px' },
+        { text: '评论匹配', width: '100px' },
+        { text: '回复内容', width: '150px' }
+      ];
+
+      headers.forEach(header => {
+        const th = document.createElement('th');
+        th.className = 'border p-2 text-center font-semibold';
+        th.style.width = header.width;
+        th.style.backgroundColor = '#e5e7eb';
+        th.style.boxShadow = '0 2px 2px -1px rgba(0, 0, 0, 0.1)'; // 添加阴影以更好遮住后面的内容
+
+        if (header.class === 'select-all') {
+          const checkbox = document.createElement('input');
+          checkbox.type = 'checkbox';
+          checkbox.onchange = (e) => toggleSelectAll(e.target);
+          checkbox.style.margin = '0 auto';
+          checkbox.style.display = 'block';
+          th.appendChild(checkbox);
+        } else {
+          th.textContent = header.text;
+        }
+
+        headerRow.appendChild(th);
+      });
+
+      thead.appendChild(headerRow);
+      table.appendChild(thead);
+
+      // 创建表体
+      const tbody = document.createElement('tbody');
+
+      // 初始化或更新表格数据
+      if (channelTableData.length === 0 || channelTableData.length !== channels.length) {
+        channelTableData = channels.map((name, index) => ({
+          index: index + 1,
+          channelName: name,
+          publishContent: '',
+          publishImage: '',
+          postMatch: '',
+          likeProbability: '',
+          commentContent: '',
+          commentMatch: '',
+          replyContent: ''
+        }));
+      } else {
+        // 更新频道名称（如果列表变化了）
+        channels.forEach((name, index) => {
+          if (channelTableData[index]) {
+            channelTableData[index].channelName = name;
+          }
+        });
+      }
+
+      channelTableData.forEach((rowData, index) => {
+        const row = document.createElement('tr');
+        row.className = 'hover:bg-gray-100';
+        row.dataset.index = index;
+
+        // 复选框列
+        const tdCheckbox = document.createElement('td');
+        tdCheckbox.className = 'border p-1 text-center';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.className = 'row-checkbox';
+        tdCheckbox.appendChild(checkbox);
+        row.appendChild(tdCheckbox);
+
+        // 序号列
+        const tdIndex = document.createElement('td');
+        tdIndex.className = 'border p-1 text-center';
+        tdIndex.textContent = rowData.index;
+        row.appendChild(tdIndex);
+
+        // 频道名称列（不可编辑，从接口获取）
+        const tdChannelName = document.createElement('td');
+        tdChannelName.className = 'border p-1';
+        tdChannelName.textContent = rowData.channelName;
+        tdChannelName.style.fontWeight = '500';
+        tdChannelName.style.textAlign = 'center';
+        row.appendChild(tdChannelName);
+
+        // 可编辑列
+        const editableFields = [
+          'publishContent', 'publishImage',
+          'postMatch', 'likeProbability',
+          'commentContent', 'commentMatch',
+          'replyContent'
+        ];
+
+        editableFields.forEach(field => {
+          const td = document.createElement('td');
+          td.className = 'border p-1';
+          td.contentEditable = true;
+          td.textContent = rowData[field] || '';
+          td.style.minHeight = '30px';
+          td.style.outline = 'none';
+          td.style.wordBreak = 'break-word';
+          td.addEventListener('focus', (e) => {
+            e.target.style.backgroundColor = '#fef3c7';
+          });
+          td.addEventListener('blur', (e) => {
+            rowData[field] = e.target.textContent.trim();
+            e.target.style.backgroundColor = '';
+          });
+          row.appendChild(td);
+        });
+
+        tbody.appendChild(row);
+      });
+
+      table.appendChild(tbody);
+      container.appendChild(table);
+    }
+
+    // 加载已加入频道列表
+    function loadJoinedList() {
+      const loading = document.getElementById("joined_loading");
+      const container = document.getElementById("joined_table_container");
+      
+      // 获取浏览器ID
+      const browser_id = document.getElementById("browser_id").value.trim();
+      if (!browser_id) {
+        appendLog("请输入浏览器ID", "error");
+        return;
+      }
+
+      loading.style.display = "inline";
+
+      fetch('/qq/joined_channels', {
+        method: "POST",
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          browser_id: browser_id
+        })
+      })
+        .then(res => res.json())
+        .then(data => {
+          loading.style.display = "none";
+          if (data.code === 200 && Array.isArray(data.result)) {
+            createChannelTable(data.result);
+            // 加载频道列表成功后，自动获取用户名称
+            getUserName();
+          } else {
+            container.textContent = `加载失败: ${data.result || '未知错误'}`;
+          }
+        })
+        .catch(err => {
+          loading.style.display = "none";
+          container.textContent = `请求失败: ${err.message}`;
+        });
+    }
+  </script>
+</body>
+
+</html>
