@@ -1,143 +1,210 @@
-# 开发环境 & 部署环境
-+ 开发
-    + Python3.8.6
-    + Pip20.2.4
-    + MySQL8.0
-+ 部署
-    + Centos7.9
-    + Docker23.0.3
-    + Python3.8.6
-    + Pip20.2.4
-    + MySQL8.0
-# 项目结构
+# HKTicket
+
+面向香港快达票（[hkt.hkticketing.com](https://hkt.hkticketing.com)）的多账号抢票辅助工具。
+
+用 Flask 提供本地 Web 控制台，通过 [比特浏览器](https://www.bitbrowser.cn/) 的本地 API 驱动多个指纹浏览器窗口，
+让每个抢票人在各自独立的浏览器环境（独立 cookie、指纹、可配独立 IP）里并发抢票。
+
+> **仅供个人学习与自用。** 使用前请确认符合目标站点的服务条款。
+> 程序默认只执行到「确认订单」锁单为止，**不会自动付款**。
+
+---
+
+## 功能
+
+| 模块 | 说明 |
+|---|---|
+| 抢票人管理 | 增删改查、批量删除，账号密码存本地；每人绑定一个独立浏览器窗口 |
+| 登录态检测 | 通过站点接口精确判断谁已登录，已登录的自动跳过，不做无谓的重复登录 |
+| 一键登录 | 并发拉起窗口、填账号密码、点登录；**验证码由人工完成** |
+| 票务解析 | 一个请求拿全所有场次/票档/售罄状态，不需要登录、不点「立即购买」 |
+| 抢票配置 | 每人各自配置场次、票档、张数，支持批量填充，改动自动保存 |
+| 立即 / 定时抢票 | 多账号并发；定时精确到秒；支持暂停、恢复、停止 |
+| 蹲回流票 | 可以配置当前已售罄的票档，程序持续轮询，等有人退票放出时抢入 |
+| 实时日志 | SSE 推送，倒计时和蹲票状态原地刷新不刷屏 |
+
+---
+
+## 环境要求
+
+- **Python 3.10+**（开发环境为 3.14）
+- **比特浏览器客户端**，需已登录并保持运行（程序通过 `127.0.0.1:54345` 与之通信）
+- 每个抢票人对应一个比特浏览器窗口
+
+---
+
+## 快速开始
+
+### 1. 安装
+
+```bash
+git clone https://github.com/MumuJun020/HKTicket.git
+cd HKTicket
+python3 -m venv venv
+./venv/bin/pip install -r requirements.txt
 ```
-    + app   # 项目主要编辑目录
-        + Controllers   # 接口编辑
-        + Middleware    # 中间件
-        + Models    # 第三方模块，如连接MySQL
-        + static    # 静态资源存放路径
-        + templates     # 模板存放路径
-        app.py  # flask对象实例化位置
-        config.py   # 配置文件编辑位置
-        router.py   # 蓝图注册（路由注册）
-    + log   # gunicorn日志存放位置
-        gunicorn.pid
-        gunicorn_access.log
-        gunicorn_error.log
-    + sql   # 测试数据库
-        by.sql
-    docker_run.sh   # 容器启动文件
-    Dockerfile  # 构建项目启动镜像
-    gunicorn.conf.py    # gunicorn配置文件
-    requierments.txt    # 依赖包记录
-    run.py  # 启动路径
-    
+
+Playwright 走 CDP 连接比特浏览器已有的内核，**不需要**执行 `playwright install` 下载浏览器。
+
+### 2. 启动
+
+```bash
+PORT=5055 ./venv/bin/python run.py
 ```
-# 项目部署
 
-## （1）直接使用gunicorn部署
-### 一、安装python
+打开 <http://localhost:5055>。
 
-### 二、将项目上传到服务器
+> macOS 上 5000 端口默认被 ControlCenter（AirPlay）占用，所以示例用 5055。
+> 不指定 `PORT` 时默认 5000。
 
-### 三、在项目目录创建虚拟环境
-> 为了给项目创造一个独立的允许环境，将项目所需的python环境和依赖包单独存放
-#### （1）安装virtualenv
-    pip3 install virtualenv
-####（2）创建虚拟环境
-    virtualenv -p python3 venv
-#### （3）激活虚拟环境
-    source venv/bin/activate
-#### （4）在虚拟环境下安装依赖
-    pip3 install -r requirements.txt
-#### （5）启动
-    gunicorn run:app -c gunicorn.conf.py
-#### （6）后台启动
-    先执行：nohup gunicorn run:app -c gunicorn.conf.py &
-    退出后继续执行：nohup gunicorn run:app -c gunicorn.conf.py
-#### （7）退出虚拟环境
-    deactivate
+### 3. 使用流程
 
-## （2）使用docker部署
-### 一、将项目上传到服务器中，如：/root/flask-item
-### 二、安装docker
-    1. 更新依赖包
-    sudo yum update
-    2. 安装Docker需要的依赖包
-    sudo yum install -y yum-utils device-mapper-persistent-data lvm2
-    3. 添加Docker仓库
-    sudo yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-    4. 安装最新版本的Docker
-    sudo yum install docker-ce
-    5. 启动Docker服务
-    sudo systemctl start docker
-    6. 设置Docker服务开机自启动
-    sudo systemctl enable docker
-    7. 验证Docker是否安装成功（Docker已经成功安装，则会输出Docker的版本信息）
-    docker --version
-### 三、使用docker拉取python3.8.6 和 MySQL8.0.27镜像
-    docker pull python:3.8.6
-    docker pull mysql:8.0.27
-### 四、docker中创建一个自定义网络
-    docker network create my-network
-### 五、启动MySQL容器
-> 项目目录下进入sql文件夹中执行sh mysql_run.sh即可，内容如下，根据实际情况修改：
+1. 打开比特浏览器客户端，确保已登录
+2. 控制台点「窗口」加载窗口列表
+3. 点「新增」录入抢票人，**每人绑定一个独立窗口**
+4. 点「一键启动并登录」，在弹出的窗口里手动完成验证码
+5. 填活动详情页链接（或纯 projectId），点「解析」
+6. 在配置表格里给每人选场次、票档、张数（改动自动保存）
+7. 点「立即抢票」或设好时间点「定时抢票」
 
-    docker run -d --name mysql \
-    -p 3306:3306 \
-    -e MYSQL_ROOT_PASSWORD=zxxyp \
-    -v /root/mysql/data:/var/lib/mysql \
-    --network=my-network \
-    --bind-address=0.0.0.0 \
-    mysql:8.0.27 \
-    --default-authentication-plugin=mysql_native_password \
-    --character-set-server=utf8mb4 \
-    --collation-server=utf8mb4_unicode_ci \
-    --max_allowed_packet=128M \
-    --innodb_buffer_pool_size=2G \
-    --innodb_log_file_size=512M \
-    --innodb_flush_log_at_trx_commit=2 \
-    --skip-name-resolve \
-    --skip-character-set-client-handshake \
-    --explicit_defaults_for_timestamp
-* -d: 指定容器在后台运行。
-* --name: 指定容器的名称。
-* -p: 将容器的端口映射到主机的端口。
-* -e: 设置环境变量，这里设置了MySQL的root账号密码。
-* -v: 将宿主机上的目录挂载到容器中，这里将MySQL的数据目录挂载到了宿主机上的指定目录中。
-* --network: 指定容器所属的网络。
-* mysql:8.0.27: 指定要启动的MySQL镜像名称及版本号。
-* --default-authentication-plugin=mysql_native_password: 指定默认的密码验证插件。
-* --bind-address=0.0.0.0 表示允许远程连接。
-* --character-set-server=utf8mb4: 设置MySQL服务器的字符集为utf8mb4。
-* --collation-server=utf8mb4_unicode_ci: 设置MySQL服务器的排序规则为utf8mb4_unicode_ci。
-* --max_allowed_packet=128M: 设置最大允许的数据包大小为128MB。
-* --innodb_buffer_pool_size=2G: 设置InnoDB缓存池大小为2GB。
-* --innodb_log_file_size=512M: 设置InnoDB日志文件大小为512MB。
-* --innodb_flush_log_at_trx_commit=2: 设置InnoDB事务提交时日志写入的策略，这里设置为2表示事务提交时异步写入日志。
-* --skip-name-resolve: 禁用DNS反解析功能。
-* --skip-character-set-client-handshake: 禁用客户端字符集校验。
-* --explicit_defaults_for_timestamp: 启用严格的时间戳模式。
+---
 
-### 基于python3.8.6基础镜像构建项目所需镜像
-> 依赖python3.8.6这个基础镜像构建一个扩展镜像，名为：flask-item:py-3.8.6
-> 新镜像不仅具备python环境，同时还安装了项目运行所需依赖包，这样每次更新项目只需要重新启动新容器即可
+## 启动行为与数据
 
-    项目目录下执行（依据项目中Dockerfile）：
-        docker build -t flask-item:3.8.6 . 
-### 基于flask-item:3.8.6镜像启动项目容器
-    项目目录下执行:
-        sh docker_run.sh
-    
-    docker_run.sh中内容如下：
-        echo "容器启动中...."
-        docker rm -f my-container
-        docker run -d -p 5000:5000 \
-        --name my-container \
-        --network=my-network \
-        -v ./:/app flask-item:py-3.8.6 \
-        gunicorn run:app -c gunicorn.conf.py
-### 注意
-使用docket部署时需要修改config.py文件中主机地址，内容如下：
-* MYSQL_HOST = '127.0.0.1'  # 主机名
-* MYSQL_HOST = 'mysql'  # 主机名,docker部署使用,设置为docker中同一网络环境下的MySQL容器名称
+程序**每次启动都会清空上一轮数据**，保证下次启动是干净的：
+
+| 数据 | 文件 | 启动时 |
+|---|---|---|
+| 抢票人（含密码） | `data/accounts.json` | 清空 |
+| 抢票配置 | `data/plans.json` | 清空 |
+| 解析的活动信息 | `data/event.json` | 保留 |
+
+清理放在**启动时**而不是退出时——`kill -9`、崩溃、断电时退出钩子不会执行，靠不住。
+debug 模式下的热重载不会触发清理（靠 `WERKZEUG_RUN_MAIN` 判断），改代码不会把录到一半的数据清掉。
+
+环境变量：
+
+| 变量 | 作用 |
+|---|---|
+| `PORT` | 监听端口，默认 5000 |
+| `KEEP_DATA=1` | 跳过启动清理，沿用上一轮数据（调试用） |
+| `CLEAR_EVENT=1` | 连解析好的活动一起清 |
+
+> ⚠️ `data/accounts.json` 里的密码是**明文**存储的——登录时要把原文填进页面表单，做不了单向哈希。
+> 该目录已在 `.gitignore` 中，但请勿将其同步到网盘或分发。
+
+---
+
+## 项目结构
+
+```
+app/
+├── Auto/                     # 自动化核心
+│   ├── bit_api.py            # 比特浏览器本地 API 封装（开窗、列表、进程状态）
+│   ├── ticket_store.py       # JSON 持久化：抢票人 / 配置 / 活动
+│   ├── ticket_parser.py      # 票务解析（HTTP 直取活动接口）
+│   ├── ticket_login.py       # 一键登录 + 登录态检测
+│   ├── ticket_api.py         # 在浏览器页面上下文里调站点只读接口
+│   └── ticket_operation.py   # 抢票引擎（选场次→选票档→提交→锁单）
+├── Controllers/
+│   └── ticket.py             # 全部 HTTP 接口 + SSE 日志流
+├── templates/index.html      # 单页控制台（原生 JS + Tailwind CDN）
+└── utils/logger.py           # 任务日志与状态管理（暂停/恢复/停止）
+run.py                        # 入口，含启动清理
+```
+
+---
+
+## 设计要点
+
+以下几条是踩过坑之后定下来的，改动前请先读对应源码里的注释。
+
+### 一个窗口只能绑一个抢票人
+
+两个账号共用同一窗口时，并发登录会连到同一个浏览器、操作同一个页面，
+互相覆盖对方填的账号密码——表现为「两个人的密码进了同一个框，另一个窗口没人动」。
+前端禁选、后端保存和抢票入口各有一道校验。
+
+### 售罄判断看 `saleState` 和 `sellOut`，不要用 `canAddCart`
+
+`canAddCart` 是「能否加入购物车」，不是「能否购买」。实测有活动票档可正常购买但该字段为 `false`。
+
+判断规则：
+
+```
+场次在售 = saleState == 2          # 3 = 售罄/停售
+票档可买 = 场次在售 且 sellOut != True
+```
+
+场次 `saleState == 3` 时，票档的 `sellOut` 说什么都不算数。
+
+### 解析走接口，不点「立即购买」
+
+活动详情页接口 `GET /api/pro/project?projectToken=<projectId>` 一次返回全部场次和票档。
+服务端只校验 `referer` 和 `site: m` 两个请求头，不需要登录。
+
+好处是不碰购买按钮——有风控时点「立即购买」可能直接进不去，也就看不到票务信息。
+
+### 请求节流是硬性要求
+
+站点按 IP 限流，**触发后该 IP 连正常浏览都不行**（所有请求 `ERR_CONNECTION_CLOSED`），持续时间很长。
+
+致命的不是次数而是**模式**：纯接口连打（不加载页面资源、无埋点）是典型爬虫特征。
+因此代码里有多层约束：
+
+- `ticket_api.MIN_API_INTERVAL = 3s`，按窗口分组节流
+- 解析全程只发一个请求
+- 抢票默认间隔 2~4 秒，并带限流识别与指数退避（15s 起，上限 5 分钟）
+
+### 只读用接口，写操作全程走 UI
+
+查登录态、查库存这类**不改变状态**的操作，在浏览器页面上下文里发请求（走窗口自己的 IP 和 cookie）。
+
+但下单链路（选场次→选票档→提交→勾选条款→确认订单）**必须全程 UI 自动化**：
+它有状态、有顺序依赖，接口直接建单会让页面状态脱节，风控也更容易识别。
+
+---
+
+## 接口一览
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/ticket/accounts` | 抢票人列表 |
+| POST | `/ticket/accounts/save` | 新增/更新抢票人 |
+| POST | `/ticket/accounts/delete` | 删除单个 |
+| POST | `/ticket/accounts/delete_batch` | 批量删除 |
+| GET | `/ticket/browsers` | 比特浏览器窗口列表 |
+| GET | `/ticket/login_status` | 各账号登录状态（`?open=1` 强制拉起未开窗口） |
+| POST | `/ticket/login_all` | 一键登录 |
+| POST | `/ticket/parse_event` | 解析活动 |
+| GET | `/ticket/event` | 取上次解析结果 |
+| GET/POST | `/ticket/plans`、`/ticket/plans/save` | 抢票配置 |
+| POST | `/ticket/do_grab` | 发起抢票（含定时） |
+| POST | `/ticket/control_task` | 暂停/恢复/停止 |
+| GET | `/ticket/logs_stream` | SSE 日志流 |
+| GET | `/ticket/get_logs` | 按 task_id 拉日志（SSE 不可用时的兜底） |
+
+---
+
+## 常见问题
+
+**连不上比特浏览器**
+确认客户端已启动并登录。程序通过 `127.0.0.1:54345` 通信，客户端未运行时接口会直接提示。
+
+**窗口列表返回「token 失效」**
+比特浏览器客户端掉登录了，在客户端里重新登录即可。
+
+**解析显示全部售罄，但页面上有票**
+检查是否用了 `canAddCart` 判断（见上文）。也可能活动确实刚售罄，重新解析确认。
+
+**抢票一直「未找到匹配场次」**
+配置与当前解析的活动不是同一个。重新解析目标活动并重新配置——后端会校验并给出提示。
+
+**所有账号突然都访问不了站点**
+IP 被限流了。等待恢复，并给窗口配置独立代理；同时调大重试间隔。
+
+---
+
+## License
+
+见 [LICENSE](LICENSE)。

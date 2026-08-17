@@ -1,1251 +1,1065 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh">
 
 <head>
   <meta charset="UTF-8" />
-  <title>QQ频道自动化控制台</title>
-  <script src="https://unpkg.com/htmx.org@1.9.5"></script>
+  <title>抢票控制台</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <script>
-    let uploaded_image_url = "";
-    let currentTaskId = null;
-    let currentPublicTaskId = null; // 当前发布任务的ID
-    let logEventSource = null; // SSE连接对象
-    let countdownElement = null; // 跟踪倒计时元素
-    let isGlobalMode = false; // 是否处于全局模式
+  <style>
+    /* 单色系设计：只用黑白灰，状态靠字重和灰度区分，不靠颜色堆砌 */
+    :root {
+      --ink: #18181b;      /* 主文字 / 主按钮底色 */
+      --ink-2: #52525b;    /* 次文字 */
+      --ink-3: #a1a1aa;    /* 弱文字 */
+      --line: #e4e4e7;     /* 边框 */
+      --line-2: #f4f4f5;   /* 极浅分隔 */
+      --bg: #fafafa;
+    }
+    /* 整页锁死一屏：卡片尺寸固定，滚动发生在卡片内部而不是整个页面。
+       否则加到 10 个抢票人时列表会把页面撑长，一滚动顶栏和「开抢」按钮就跑没了。 */
+    html, body { height: 100%; overflow: hidden; }
+    body { background: var(--bg); color: var(--ink); display: flex; flex-direction: column; }
 
-    // 添加日志到显示区域
-    function appendLog(message, level = "info") {
-      const logDiv = document.getElementById("log");
-
-      // 检查是否是倒计时消息
-      const isCountdown = message.includes("[COUNTDOWN]");
-
-      if (isCountdown) {
-        // 如果是倒计时，更新已有的倒计时行或创建新行
-        message = message.replace("[COUNTDOWN]", "").trim();
-
-        if (countdownElement) {
-          // 更新已有的倒计时行（不更新时间戳，只更新消息内容）
-          const timestampSpan = countdownElement.querySelector("span.text-gray-500");
-          const timestamp = timestampSpan ? timestampSpan.textContent : `[${new Date().toLocaleTimeString()}]`;
-          countdownElement.innerHTML = `<span class="text-gray-500">${timestamp}</span> <span class="text-blue-400">${escapeHtml(message)}</span>`;
-        } else {
-          // 创建新的倒计时行
-          const timestamp = new Date().toLocaleTimeString();
-          countdownElement = document.createElement("div");
-          countdownElement.id = "countdown-log";
-          countdownElement.className = `mb-1`;
-          countdownElement.innerHTML = `<span class="text-gray-500">[${timestamp}]</span> <span class="text-blue-400">${escapeHtml(message)}</span>`;
-          logDiv.appendChild(countdownElement);
-        }
-      } else {
-        // 如果不是倒计时，移除倒计时行（如果存在）
-        if (countdownElement) {
-          countdownElement.remove();
-          countdownElement = null;
-        }
-
-        // 正常添加新日志
-        const timestamp = new Date().toLocaleTimeString();
-        const logEntry = document.createElement("div");
-        logEntry.className = `mb-1`;
-
-        let color = "text-green-400"; // info
-        if (level === "error") color = "text-red-400";
-        else if (level === "warning") color = "text-yellow-400";
-
-        logEntry.innerHTML = `<span class="text-gray-500">[${timestamp}]</span> <span class="${color}">${escapeHtml(message)}</span>`;
-        logDiv.appendChild(logEntry);
-      }
-
-      // 自动滚动到底部
-      logDiv.scrollTop = logDiv.scrollHeight;
+    /* 窄屏放弃锁死：一屏塞不下那么多卡片，退化成正常页面滚动 */
+    @media (max-width: 1023px) {
+      html, body { height: auto; overflow: visible; }
     }
 
-    // HTML转义函数
-    function escapeHtml(text) {
-      const div = document.createElement('div');
-      div.textContent = text;
-      return div.innerHTML;
+    /* 需要内部滚动的区域统一样式，滚动条做细一点免得抢视线 */
+    .scroll-y { overflow-y: auto; min-height: 0; }
+    .scroll-y::-webkit-scrollbar { width: 6px; }
+    .scroll-y::-webkit-scrollbar-thumb { background: #d4d4d8; border-radius: 3px; }
+    .scroll-y::-webkit-scrollbar-track { background: transparent; }
+    .card { background:#fff; border:1px solid var(--line); border-radius:6px; }
+    .hd { border-bottom:1px solid var(--line); }
+
+    /* 按钮：主=黑底白字，次=白底细边，危险=白底红字（只在删除时出现） */
+    .btn { font-size:13px; padding:6px 14px; border-radius:5px; border:1px solid var(--line);
+           background:#fff; color:var(--ink); transition:.12s; white-space:nowrap; line-height:1.4; }
+    .btn:hover { border-color:var(--ink-3); }
+    .btn:disabled { opacity:.45; cursor:not-allowed; }
+    .btn-primary { background:var(--ink); color:#fff; border-color:var(--ink); }
+    .btn-primary:hover { background:#000; border-color:#000; }
+    .btn-sm { font-size:12px; padding:3px 9px; }
+    .btn-danger:hover { color:#dc2626; border-color:#fca5a5; }
+
+    /* 表单控件统一：细边框、聚焦时边框变黑而不是变蓝 */
+    .inp, select.inp { border:1px solid var(--line); border-radius:5px; padding:6px 10px;
+                       font-size:13px; background:#fff; color:var(--ink); outline:none; width:100%; }
+    .inp:focus { border-color:var(--ink); }
+    label.lbl { font-size:12px; color:var(--ink-2); display:block; margin-bottom:5px; }
+
+    /* 状态点：在线用实心黑，其余用灰度层次。
+       必须 inline-block——span 默认是 inline，宽高不生效，
+       在表格单元格里会被压成一条竖线（flex 容器里碰巧正常，所以容易漏掉）。 */
+    .dot { display:inline-block; width:6px; height:6px; border-radius:50%; flex-shrink:0; }
+    .dot-on { background:var(--ink); }
+    .dot-off { background:#d4d4d8; }
+    .dot-idle { background:#fff; border:1px solid #d4d4d8; }
+    .dot-err { background:#fff; border:1px solid #ef4444; }
+
+    table.tb { width:100%; font-size:13px; border-collapse:collapse; }
+    table.tb th { font-size:12px; font-weight:500; color:var(--ink-3); text-align:left;
+                  padding:8px 10px; border-bottom:1px solid var(--line); }
+    table.tb td { padding:9px 10px; border-bottom:1px solid var(--line-2); vertical-align:middle; }
+    table.tb tr:last-child td { border-bottom:none; }
+
+    .tag { font-size:11px; padding:2px 7px; border-radius:4px; border:1px solid var(--line); color:var(--ink-2); }
+    .tag-out { color:var(--ink-3); text-decoration:line-through; background:var(--line-2); }
+
+    /* ---------- 日期时间选择器：iOS 风格滚轮 ---------- */
+    .dtp { position:fixed; z-index:60; right:24px; bottom:24px; width:min(520px, calc(100vw - 32px));
+           background:rgba(255,255,255,.96); border:1px solid var(--line); border-radius:8px;
+           box-shadow:0 18px 50px rgba(0,0,0,.18); overflow:hidden; backdrop-filter:blur(18px); }
+    .dtp-hd { height:44px; display:flex; align-items:center; gap:10px; padding:0 12px;
+              border-bottom:1px solid var(--line); }
+    .dtp-wheel-wrap { position:relative; display:grid; grid-template-columns:1.7fr .8fr .8fr .8fr;
+                      height:226px; padding:10px 12px; column-gap:8px; }
+    .dtp-wheel-wrap::before { content:""; position:absolute; left:12px; right:12px; top:97px; height:32px;
+                              border-top:1px solid var(--line); border-bottom:1px solid var(--line);
+                              border-radius:5px; pointer-events:none; }
+    .dtp-wheel-wrap::after { content:""; position:absolute; inset:10px 12px;
+                             background:linear-gradient(#fff 0%, rgba(255,255,255,.72) 18%, rgba(255,255,255,0) 42%, rgba(255,255,255,0) 58%, rgba(255,255,255,.72) 82%, #fff 100%);
+                             pointer-events:none; }
+    .dtp-wheel { height:206px; overflow-y:auto; scroll-snap-type:y mandatory; scrollbar-width:none;
+                 padding:87px 0; border-radius:6px; }
+    .dtp-wheel::-webkit-scrollbar { display:none; }
+    .dtp-item { height:32px; display:flex; align-items:center; justify-content:center; scroll-snap-align:center;
+                font-size:13px; color:var(--ink-2); cursor:pointer; font-variant-numeric:tabular-nums; }
+    .dtp-item.sel { color:var(--ink); font-weight:700; }
+    .dtp-foot { height:44px; display:flex; align-items:center; gap:8px; padding:0 12px;
+                border-top:1px solid var(--line); }
+    @media (max-width: 640px) {
+      .dtp { left:12px; right:12px; bottom:12px; width:auto; }
+      .dtp-wheel-wrap { grid-template-columns:1.45fr .8fr .8fr .8fr; column-gap:4px; padding-left:8px; padding-right:8px; }
+      .dtp-wheel-wrap::before { left:8px; right:8px; }
+      .dtp-item { font-size:12px; }
     }
-
-    // 初始化全局SSE连接（页面加载时调用）
-    function initGlobalLogStream() {
-      // 如果已经有连接，先关闭
-      if (logEventSource) {
-        logEventSource.close();
-        logEventSource = null;
-      }
-
-      // 创建全局SSE连接（不指定task_id）
-      const eventSource = new EventSource(`/qq/logs_stream`);
-      logEventSource = eventSource;
-      isGlobalMode = true;
-
-      // 设置消息处理器
-      setupSSEEventHandlers(eventSource);
-    }
-
-    // 设置SSE事件处理器（共用代码）
-    function setupSSEEventHandlers(eventSource) {
-
-      // 连接成功
-      eventSource.addEventListener('message', function (event) {
-        try {
-          const data = JSON.parse(event.data);
-
-          if (data.type === 'connected') {
-            console.log('SSE连接已建立:', data.message);
-            if (isGlobalMode) {
-              appendLog('SSE连接已建立（全局模式）', "info");
-            }
-          } else if (data.type === 'log') {
-            // 收到日志
-            const logEntry = data.data;
-            // 在全局模式下，如果日志属于当前任务，则忽略（避免重复显示）
-            // 因为任务特定连接会收到这些日志
-            if (isGlobalMode && currentTaskId && logEntry.task_id === currentTaskId) {
-              // 忽略属于当前任务的日志
-              return;
-            }
-            // 在全局模式下，日志可能包含task_id信息，但我们只显示消息
-            appendLog(logEntry.message, logEntry.level);
-
-            // 检测任务完成消息，自动更新UI
-            if (logEntry.message.includes("所有频道的点赞任务已完成") ||
-              logEntry.message.includes("所有频道的发布任务已完成") ||
-              logEntry.message.includes("所有频道的评论任务已完成") ||
-              logEntry.message.includes("所有频道的回复任务已完成")) {
-              // 任务完成，自动停止连接并更新UI
-              setTimeout(() => {
-                // 根据消息内容判断任务类型并更新对应的UI
-                if (logEntry.message.includes("所有频道的点赞任务已完成")) {
-                  // 更新点赞任务UI
-                  if (currentLikeTaskId) {
-                    document.getElementById("btn_like_start").style.display = "block";
-                    document.getElementById("btn_like_stop").style.display = "none";
-                    // 如果当前是点赞任务，停止日志轮询
-                    if (currentTaskId === currentLikeTaskId) {
-                      stopLogPolling();
-                    }
-                    currentLikeTaskId = null;
-                  }
-                } else if (logEntry.message.includes("所有频道的发布任务已完成")) {
-                  // 更新发布任务UI
-                  if (currentPublicTaskId) {
-                    document.getElementById("btn_publish").style.display = "block";
-                    document.getElementById("btn_stop").style.display = "none";
-                    // 如果当前是发布任务，停止日志轮询
-                    if (currentTaskId === currentPublicTaskId) {
-                      stopLogPolling();
-                    }
-                    currentPublicTaskId = null;
-                  }
-                } else if (logEntry.message.includes("所有频道的评论任务已完成")) {
-                  // 更新评论任务UI
-                  if (currentCommentTaskId) {
-                    document.getElementById("btn_comment_start").style.display = "block";
-                    document.getElementById("btn_comment_stop").style.display = "none";
-                    // 如果当前是评论任务，停止日志轮询
-                    if (currentTaskId === currentCommentTaskId) {
-                      stopLogPolling();
-                    }
-                    currentCommentTaskId = null;
-                  }
-                } else if (logEntry.message.includes("所有频道的回复任务已完成")) {
-                  // 更新回复任务UI
-                  if (currentReplyTaskId) {
-                    document.getElementById("btn_reply_start").style.display = "block";
-                    document.getElementById("btn_reply_stop").style.display = "none";
-                    // 如果当前是回复任务，停止日志轮询
-                    if (currentTaskId === currentReplyTaskId) {
-                      stopLogPolling();
-                    }
-                    currentReplyTaskId = null;
-                  }
-                }
-              }, 500); // 延迟500ms确保日志已显示
-            }
-          } else if (data.type === 'heartbeat') {
-            // 心跳消息，忽略
-            console.debug('SSE心跳');
-          } else if (data.type === 'end') {
-            // 日志流结束
-            appendLog(data.message || "日志流已结束", "info");
-            stopLogPolling();
-          } else if (data.type === 'timeout') {
-            // 连接超时
-            appendLog(data.message || "连接超时", "warning");
-            stopLogPolling();
-          } else if (data.type === 'error') {
-            // 发生错误
-            appendLog(`错误: ${data.message}`, "error");
-          }
-        } catch (error) {
-          console.error("解析SSE消息失败:", error, event.data);
-        }
-      });
-
-      // 监听错误事件
-      eventSource.addEventListener('error', function (event) {
-        console.error("SSE连接错误:", event);
-        // 如果连接已关闭，尝试重新连接
-        if (eventSource.readyState === EventSource.CLOSED) {
-          appendLog("SSE连接已断开", "warning");
-          stopLogPolling();
-        }
-      });
-
-      // 监听open事件
-      eventSource.addEventListener('open', function (event) {
-        console.log('SSE连接已打开');
-      });
-    }
-
-    // 开始SSE连接接收日志（切换到任务特定模式）
-    function startLogPolling(taskId) {
-      currentTaskId = taskId;
-      countdownElement = null; // 重置倒计时元素
-
-      // 关闭之前的SSE连接
-      if (logEventSource) {
-        logEventSource.close();
-        logEventSource = null;
-      }
-
-      // 创建任务特定的SSE连接
-      const eventSource = new EventSource(`/qq/logs_stream?task_id=${taskId}`);
-      logEventSource = eventSource;
-      isGlobalMode = false;
-
-      // 设置消息处理器
-      setupSSEEventHandlers(eventSource);
-    }
-
-    // 停止SSE连接
-    function stopLogPolling() {
-      const wasInTaskMode = !isGlobalMode; // 保存当前状态
-
-      if (logEventSource) {
-        logEventSource.close();
-        logEventSource = null;
-      }
-      currentTaskId = null;
-      isGlobalMode = false;
-
-      // 如果是在任务模式下停止，切换回全局模式
-      if (wasInTaskMode) {
-        // 延迟一下再重新建立全局连接，避免立即断开连接
-        setTimeout(() => {
-          initGlobalLogStream();
-        }, 100);
-      }
-    }
-
-    // 获取选中的频道列表
-    function getSelectedChannels() {
-      const selectedChannels = [];
-      const checkboxes = document.querySelectorAll('tbody input.row-checkbox:checked');
-      checkboxes.forEach(checkbox => {
-        const row = checkbox.closest('tr');
-        const rowIndex = parseInt(row.dataset.index);
-        if (channelTableData[rowIndex]) {
-          selectedChannels.push({
-            name: channelTableData[rowIndex].channelName,
-            content: channelTableData[rowIndex].publishContent || '',
-            image: channelTableData[rowIndex].publishImage || '',
-            likeProbability: channelTableData[rowIndex].likeProbability || '' // 表格中设置的点赞概率
-          });
-        }
-      });
-      return selectedChannels;
-    }
-
-    function doPublic() {
-      const selectedChannels = getSelectedChannels();
-      if (selectedChannels.length === 0) {
-        appendLog("请至少选择一个频道", "error");
-        return;
-      }
-
-      // 检查是否有发布内容
-      const hasContent = selectedChannels.some(ch => ch.content.trim() !== '');
-      if (!hasContent) {
-        appendLog("请至少在一个频道中填写发布内容", "error");
-        return;
-      }
-
-      // 获取浏览器ID
-      const browser_id = document.getElementById("browser_id").value.trim();
-      if (!browser_id) {
-        appendLog("请输入浏览器ID", "error");
-        return;
-      }
-
-      // 清空之前的日志
-      document.getElementById("log").innerHTML = "";
-      appendLog("开始发布帖子...", "info");
-
-      const wait_time_min = parseFloat(document.getElementById("publish_wait_time_min").value) || 3;
-      const wait_time_max = parseFloat(document.getElementById("publish_wait_time_max").value) || 8;
-      const check_first_page = document.getElementById("publish_check_first_page").checked;
-
-      fetch("/qq/do_public", {
-        method: "POST",
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          channels: selectedChannels,
-          wait_time_min: wait_time_min,
-          wait_time_max: wait_time_max,
-          check_first_page: check_first_page,
-          browser_id: browser_id,
-        })
-      })
-        .then((response) => response.json())
-        .then((data) => {
-          if (data.task_id) {
-            currentPublicTaskId = data.task_id;
-            startLogPolling(data.task_id);
-            // 显示控制按钮
-            document.getElementById("btn_publish").style.display = "none";
-            document.getElementById("btn_stop").style.display = "block";
-          }
-          appendLog(data.result, data.code === 200 ? "info" : "error");
-        })
-        .catch((error) => {
-          appendLog(`请求失败: ${error.message}`, "error");
-        });
-    }
-
-    // 暂停任务
-    function pauseTask() {
-      if (!currentPublicTaskId) {
-        appendLog("没有正在运行的任务", "error");
-        return;
-      }
-      fetch("/qq/control_task", {
-        method: "POST",
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          task_id: currentPublicTaskId,
-          action: "pause"
-        })
-      })
-        .then((response) => response.json())
-        .then((data) => {
-          if (data.code === 200) {
-            document.getElementById("btn_pause").style.display = "none";
-            document.getElementById("btn_resume").style.display = "inline-block";
-          }
-          appendLog(data.result, data.code === 200 ? "warning" : "error");
-        })
-        .catch((error) => {
-          appendLog(`暂停任务失败: ${error.message}`, "error");
-        });
-    }
-
-    // 恢复任务
-    function resumeTask() {
-      if (!currentPublicTaskId) {
-        appendLog("没有暂停的任务", "error");
-        return;
-      }
-      fetch("/qq/control_task", {
-        method: "POST",
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          task_id: currentPublicTaskId,
-          action: "resume"
-        })
-      })
-        .then((response) => response.json())
-        .then((data) => {
-          if (data.code === 200) {
-            document.getElementById("btn_pause").style.display = "inline-block";
-            document.getElementById("btn_resume").style.display = "none";
-          }
-          appendLog(data.result, data.code === 200 ? "info" : "error");
-        })
-        .catch((error) => {
-          appendLog(`恢复任务失败: ${error.message}`, "error");
-        });
-    }
-
-    // 停止任务
-    function stopTask() {
-      if (!currentPublicTaskId) {
-        appendLog("没有正在运行的任务", "error");
-        return;
-      }
-      fetch("/qq/control_task", {
-        method: "POST",
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          task_id: currentPublicTaskId,
-          action: "stop"
-        })
-      })
-        .then((response) => response.json())
-        .then((data) => {
-          // 隐藏所有控制按钮，显示发布按钮
-          document.getElementById("btn_publish").style.display = "block";
-          document.getElementById("btn_stop").style.display = "none";
-          currentPublicTaskId = null;
-          appendLog(data.result, data.code === 200 ? "warning" : "error");
-        })
-        .catch((error) => {
-          appendLog(`停止任务失败: ${error.message}`, "error");
-        });
-    }
-
-    // 点赞帖子
-    let currentLikeTaskId = null;
-    function doLike() {
-      const selectedChannels = getSelectedChannels();
-      if (selectedChannels.length === 0) {
-        appendLog("请至少选择一个频道", "error");
-        return;
-      }
-
-      // 获取浏览器ID
-      const browser_id = document.getElementById("browser_id").value.trim();
-      if (!browser_id) {
-        appendLog("请输入浏览器ID", "error");
-        return;
-      }
-
-      // 清空之前的日志
-      document.getElementById("log").innerHTML = "";
-
-      // 全局默认配置
-      const global_like_probability = parseFloat(document.getElementById("like_probability").value) || 0.8;
-      const post_match = document.getElementById("like_post_match").value || '';
-      const time_limit = parseInt(document.getElementById("like_time_limit").value) || 0;
-      const comment_count = parseInt(document.getElementById("like_comment_count").value) || 0;
-      const like_count = parseInt(document.getElementById("like_like_count").value) || 0;
-      const post_count = parseInt(document.getElementById("like_post_count").value) || 50;
-      const like_interval_min = parseFloat(document.getElementById("like_interval_min").value) || 10;
-      const like_interval_max = parseFloat(document.getElementById("like_interval_max").value) || 30;
-      const browse_mode = document.getElementById("like_browse_mode").value || 'new_post';
-
-      // 构建频道配置列表，每个频道使用表格中的点赞概率（如果设置了），否则使用全局设置
-      const channelsConfig = selectedChannels.map(ch => ({
-        name: ch.name,
-        like_probability: ch.likeProbability && ch.likeProbability.trim() !== ''
-          ? parseFloat(ch.likeProbability)
-          : global_like_probability,
-        post_match: post_match,
-        time_limit: time_limit,
-        comment_count: comment_count,
-        like_count: like_count,
-        post_count: post_count,
-        like_interval_min: like_interval_min,
-        like_interval_max: like_interval_max,
-        browse_mode: browse_mode,
-      }));
-
-      fetch("/qq/do_like", {
-        method: "POST",
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          channels: channelsConfig,
-          browser_id: browser_id,
-        })
-      })
-        .then((response) => response.json())
-        .then((data) => {
-          if (data.task_id) {
-            currentLikeTaskId = data.task_id;
-            startLogPolling(data.task_id);
-            document.getElementById("btn_like_start").style.display = "none";
-            document.getElementById("btn_like_stop").style.display = "block";
-          }
-          appendLog(data.result, data.code === 200 ? "info" : "error");
-        })
-        .catch((error) => {
-          appendLog(`请求失败: ${error.message}`, "error");
-        });
-    }
-
-    function stopLikeTask() {
-      if (!currentLikeTaskId) {
-        appendLog("没有正在运行的点赞任务", "error");
-        return;
-      }
-      fetch("/qq/control_task", {
-        method: "POST",
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          task_id: currentLikeTaskId,
-          action: "stop"
-        })
-      })
-        .then((response) => response.json())
-        .then((data) => {
-          document.getElementById("btn_like_start").style.display = "block";
-          document.getElementById("btn_like_stop").style.display = "none";
-          currentLikeTaskId = null;
-          appendLog(data.result, data.code === 200 ? "warning" : "error");
-        })
-        .catch((error) => {
-          appendLog(`停止点赞任务失败: ${error.message}`, "error");
-        });
-    }
-
-    // 评论帖子
-    let currentCommentTaskId = null;
-    function doComment() {
-      const selectedChannels = getSelectedChannels();
-      if (selectedChannels.length === 0) {
-        appendLog("请至少选择一个频道", "error");
-        return;
-      }
-
-      const comment_content = document.getElementById("comment_content").value || '';
-      if (!comment_content.trim()) {
-        appendLog("请输入评论内容", "error");
-        return;
-      }
-
-      // 获取浏览器ID
-      const browser_id = document.getElementById("browser_id").value.trim();
-      if (!browser_id) {
-        appendLog("请输入浏览器ID", "error");
-        return;
-      }
-
-      // 清空之前的日志
-      document.getElementById("log").innerHTML = "";
-      appendLog("开始评论任务...", "info");
-
-      // 收集所有参数
-      const post_match = document.getElementById("comment_post_match").value || '';
-      const comment_probability = parseFloat(document.getElementById("comment_probability").value) || 0.8;
-      const time_limit = parseInt(document.getElementById("comment_time_limit").value) || 0;
-      const comment_count = parseInt(document.getElementById("comment_comment_count").value) || 0;
-      const like_count = parseInt(document.getElementById("comment_like_count").value) || 0;
-      const share_count = parseInt(document.getElementById("comment_share_count").value) || 0;
-      const post_count = parseInt(document.getElementById("comment_post_count").value) || 50;
-      const comment_interval_min = parseFloat(document.getElementById("comment_interval_min").value) || 10;
-      const comment_interval_max = parseFloat(document.getElementById("comment_interval_max").value) || 30;
-      const browse_mode = document.getElementById("comment_browse_mode").value || 'new_post';
-      const publisher_name = document.getElementById("comment_publisher_name").value || '';
-
-      const channelNames = selectedChannels.map(ch => ch.name);
-
-      fetch("/qq/do_comment", {
-        method: "POST",
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          channels: channelNames,
-          post_match: post_match,
-          comment_content: comment_content,
-          comment_probability: comment_probability,
-          time_limit: time_limit,
-          comment_count: comment_count,
-          like_count: like_count,
-          share_count: share_count,
-          post_count: post_count,
-          comment_interval_min: comment_interval_min,
-          comment_interval_max: comment_interval_max,
-          browse_mode: browse_mode,
-          publisher_name: publisher_name,
-          browser_id: browser_id,
-        })
-      })
-        .then((response) => response.json())
-        .then((data) => {
-          if (data.task_id) {
-            currentCommentTaskId = data.task_id;
-            startLogPolling(data.task_id);
-            document.getElementById("btn_comment_start").style.display = "none";
-            document.getElementById("btn_comment_stop").style.display = "block";
-          }
-          appendLog(data.result, data.code === 200 ? "info" : "error");
-        })
-        .catch((error) => {
-          appendLog(`请求失败: ${error.message}`, "error");
-        });
-    }
-
-    function stopCommentTask() {
-      if (!currentCommentTaskId) {
-        appendLog("没有正在运行的评论任务", "error");
-        return;
-      }
-      fetch("/qq/control_task", {
-        method: "POST",
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          task_id: currentCommentTaskId,
-          action: "stop"
-        })
-      })
-        .then((response) => response.json())
-        .then((data) => {
-          document.getElementById("btn_comment_start").style.display = "block";
-          document.getElementById("btn_comment_stop").style.display = "none";
-          currentCommentTaskId = null;
-          appendLog(data.result, data.code === 200 ? "warning" : "error");
-        })
-        .catch((error) => {
-          appendLog(`停止评论任务失败: ${error.message}`, "error");
-        });
-    }
-
-    // 回复帖子
-    let currentReplyTaskId = null;
-    function doReply() {
-      const selectedChannels = getSelectedChannels();
-      if (selectedChannels.length === 0) {
-        appendLog("请至少选择一个频道", "error");
-        return;
-      }
-
-      const post_match = document.getElementById("reply_post_match").value || '';
-      const comment_match = document.getElementById("reply_comment_match").value || '';
-      const reply_content = document.getElementById("reply_content").value || '';
-
-      if (!reply_content.trim()) {
-        appendLog("请输入回复内容", "error");
-        return;
-      }
-
-      // 获取浏览器ID
-      const browser_id = document.getElementById("browser_id").value.trim();
-      if (!browser_id) {
-        appendLog("请输入浏览器ID", "error");
-        return;
-      }
-
-      // 清空之前的日志
-      document.getElementById("log").innerHTML = "";
-      appendLog("开始回复任务...", "info");
-
-      const channelNames = selectedChannels.map(ch => ch.name);
-
-      fetch("/qq/do_reply", {
-        method: "POST",
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          channels: channelNames,
-          post_match: post_match,
-          comment_match: comment_match,
-          reply_content: reply_content,
-          browser_id: browser_id,
-        })
-      })
-        .then((response) => response.json())
-        .then((data) => {
-          if (data.task_id) {
-            currentReplyTaskId = data.task_id;
-            startLogPolling(data.task_id);
-            document.getElementById("btn_reply_start").style.display = "none";
-            document.getElementById("btn_reply_stop").style.display = "block";
-          }
-          appendLog(data.result, data.code === 200 ? "info" : "error");
-        })
-        .catch((error) => {
-          appendLog(`请求失败: ${error.message}`, "error");
-        });
-    }
-
-    function stopReplyTask() {
-      if (!currentReplyTaskId) {
-        appendLog("没有正在运行的回复任务", "error");
-        return;
-      }
-      fetch("/qq/control_task", {
-        method: "POST",
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          task_id: currentReplyTaskId,
-          action: "stop"
-        })
-      })
-        .then((response) => response.json())
-        .then((data) => {
-          document.getElementById("btn_reply_start").style.display = "block";
-          document.getElementById("btn_reply_stop").style.display = "none";
-          currentReplyTaskId = null;
-          appendLog(data.result, data.code === 200 ? "warning" : "error");
-        })
-        .catch((error) => {
-          appendLog(`停止回复任务失败: ${error.message}`, "error");
-        });
-    }
-
-    // 页面卸载时停止SSE连接
-    window.addEventListener("beforeunload", () => {
-      stopLogPolling();
-    });
-
-    // 获取用户名称
-    function getUserName() {
-      // 获取浏览器ID
-      const browser_id = document.getElementById("browser_id").value.trim();
-      if (!browser_id) {
-        console.warn("浏览器ID未设置，跳过获取用户名称");
-        return;
-      }
-
-      console.log("开始获取用户名称...");
-      appendLog("正在获取用户名称...", "info");
-
-      fetch('/qq/user_name', {
-        method: "POST",
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          browser_id: browser_id
-        })
-      })
-        .then(res => res.json())
-        .then(data => {
-          console.log("获取用户名称响应:", data);
-          if (data.code === 200 && data.result) {
-            // 将获取的用户名填充到评论功能的发布者名称输入框
-            const publisherNameInput = document.getElementById("comment_publisher_name");
-            console.log("找到输入框:", publisherNameInput);
-            if (publisherNameInput) {
-              const userName = data.result.trim();
-              publisherNameInput.value = userName;
-              console.log("已设置用户名:", userName);
-              appendLog(`已自动填充发布者名称: ${userName}`, "info");
-            } else {
-              console.error("未找到发布者名称输入框 (#comment_publisher_name)");
-              appendLog("错误：未找到发布者名称输入框", "error");
-            }
-          } else {
-            console.warn("获取用户名称失败:", data);
-            appendLog(`获取用户名称失败: ${data.result || '未知错误'}`, "warning");
-          }
-        })
-        .catch(err => {
-          console.error("请求用户名称失败:", err);
-          appendLog(`请求用户名称失败: ${err.message}`, "error");
-        });
-    }
-
-    // 页面加载时初始化全局SSE连接
-    document.addEventListener("DOMContentLoaded", () => {
-      initGlobalLogStream();
-      // 用户名称将在加载频道列表后自动获取
-    });
-
-  </script>
+  </style>
 </head>
 
-<body class="bg-gray-100 p-6 h-screen flex flex-col">
-  <h1 class="text-2xl font-bold mb-4 text-center">QQ频道自动化控制台</h1>
+<body>
 
-  <!-- 左边是功能操作区域，右边是日志输出区域，中间有间隔，操作区域无论多高，日志区域高度都只是占满整个屏幕 -->
-  <div class="flex flex-1 gap-4">
-    <!-- 操作区域 -->
-    <div class="w-4/5">
-      <!-- 浏览器ID配置区域 -->
-      <div class="p-4 bg-white rounded-xl shadow mb-6">
-        <h2 class="text-xl font-semibold mb-3">浏览器配置</h2>
-        <div class="flex items-center gap-4">
-          <label class="text-sm text-gray-700 font-medium whitespace-nowrap">浏览器ID:</label>
-          <input type="text" id="browser_id" placeholder="请输入浏览器ID" 
-            class="border p-2 rounded flex-1 text-sm" value="77eae086c94e44b687e54dd1234e7282" />
-          <button class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 text-sm whitespace-nowrap" 
-            onclick="getUserName()">
-            测试获取用户名
-          </button>
-          <span class="text-xs text-gray-500">请从指纹浏览器中获取浏览器ID并填写在此处</span>
-        </div>
+  <!-- ======================= 顶栏 ======================= -->
+  <header class="bg-white border-b shrink-0 z-30" style="border-color:var(--line)">
+    <div class="w-full px-6 h-14 flex items-center gap-5">
+      <h1 class="text-[15px] font-semibold tracking-tight">抢票控制台</h1>
+      <span class="text-xs" style="color:var(--ink-3)">hkticketing</span>
+
+      <div class="flex items-center gap-2.5 ml-1">
+        <span id="status_summary" class="text-[13px]" style="color:var(--ink-2)">—</span>
+        <button onclick="refreshLoginStatus()" id="btn_refresh_status" class="btn btn-sm"
+          title="只查已打开的窗口，不会弹出新窗口">刷新状态</button>
       </div>
 
-      <!-- 加载已加入频道列表 -->
-      <div class="p-4 bg-white rounded-xl shadow mb-6">
-        <div class="flex items-center justify-between mb-3">
-          <h2 class="text-xl font-semibold">已加入频道</h2>
-          <div class="flex items-center gap-2">
-            <button class="bg-purple-500 text-white px-4 py-2 rounded hover:bg-purple-600" onclick="loadJoinedList()">
-              加载
-            </button>
-            <span id="joined_loading" class="text-sm text-gray-500" style="display:none;">加载中...</span>
-          </div>
-        </div>
-        <div id="joined_list" class="border rounded max-h-[600px] overflow-auto text-sm text-gray-800 bg-gray-50">
-          <div id="joined_table_container" style="min-width: 100%; padding: 12px 12px 12px 12px;">
-            点击上方按钮加载频道列表
-          </div>
-        </div>
-      </div>
-
-      <!-- 功能操作区域，四个功能在一行，从上到下分别是标题，各种配置项，开始执行，停止 -->
-      <div class="p-4 bg-white rounded-xl shadow mb-6">
-        <h2 class="text-xl font-semibold mb-4">功能操作</h2>
-        <div class="grid grid-cols-4 gap-4">
-          <!-- 发布帖子功能 -->
-          <div class="border rounded-lg p-4 bg-gray-50">
-            <h4 class="text-lg font-semibold mb-3 text-center">发布帖子</h4>
-            <div class="space-y-3">
-              <!-- 操作间隔时间 -->
-              <div>
-                <label class="text-sm text-gray-600 mb-1 block">操作间隔时间（秒）</label>
-                <div class="flex items-center gap-2">
-                  <input type="number" id="publish_wait_time_min" placeholder="最小值"
-                    class="border p-2 w-full rounded text-sm" value="3" min="0" />
-                  <span class="text-gray-600">~</span>
-                  <input type="number" id="publish_wait_time_max" placeholder="最大值"
-                    class="border p-2 w-full rounded text-sm" value="8" min="0" />
-                </div>
-              </div>
-              <!-- 检测第一页是否发布过 -->
-              <div>
-                <label class="flex items-center gap-2 text-sm text-gray-700">
-                  <input type="checkbox" id="publish_check_first_page" class="w-4 h-4" checked />
-                  <span>检测第一页是否发布过</span>
-                </label>
-              </div>
-            </div>
-            <div class="mt-4 space-y-2">
-              <button class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 cursor-pointer w-full text-sm"
-                onclick="doPublic()" id="btn_publish">
-                开始执行
-              </button>
-              <button class="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600 cursor-pointer w-full text-sm"
-                onclick="stopTask()" id="btn_stop" style="display:none;">
-                停止
-              </button>
-            </div>
-          </div>
-
-          <!-- 点赞帖子功能 -->
-          <div class="border rounded-lg p-4 bg-gray-50">
-            <h4 class="text-lg font-semibold mb-3 text-center">点赞帖子</h4>
-            <div class="space-y-3">
-              <!-- 浏览方式 -->
-              <div>
-                <label class="text-sm text-gray-600 mb-1 block">浏览方式</label>
-                <select id="like_browse_mode" class="border p-2 w-full rounded text-sm">
-                  <option value="new_post" selected>新发表</option>
-                  <option value="new_reply">新回复</option>
-                  <option value="hot">热门</option>
-                </select>
-              </div>
-              <!-- 点赞概率 -->
-              <div>
-                <label class="text-sm text-gray-600 mb-1 block">点赞概率（全局默认）</label>
-                <input type="number" id="like_probability" placeholder="0~1" step="0.1"
-                  class="border p-2 w-full rounded text-sm" value="0.8" min="0" max="1" />
-              </div>
-              <!-- 帖子内容匹配关键词 -->
-              <div>
-                <label class="text-sm text-gray-600 mb-1 block">帖子内容匹配关键词</label>
-                <input type="text" id="like_post_match" placeholder="关键词，多个用逗号分隔"
-                  class="border p-2 w-full rounded text-sm" />
-              </div>
-              <!-- 时间限制 -->
-              <div>
-                <label class="text-sm text-gray-600 mb-1 block">时间限制（小时，0=不限制）</label>
-                <input type="number" id="like_time_limit" placeholder="x小时内，0表示不限制"
-                  class="border p-2 w-full rounded text-sm" value="0" min="0" />
-              </div>
-              <!-- 评论数 -->
-              <div>
-                <label class="text-sm text-gray-600 mb-1 block">评论数（超过x个，0=无要求）</label>
-                <input type="number" id="like_comment_count" placeholder="评论数阈值"
-                  class="border p-2 w-full rounded text-sm" value="0" min="0" />
-              </div>
-              <!-- 点赞数 -->
-              <div>
-                <label class="text-sm text-gray-600 mb-1 block">点赞数（超过x个，0=无要求）</label>
-                <input type="number" id="like_like_count" placeholder="点赞数阈值" class="border p-2 w-full rounded text-sm"
-                  value="0" min="0" />
-              </div>
-              <!-- 浏览帖子数量 -->
-              <div>
-                <label class="text-sm text-gray-600 mb-1 block">浏览帖子数量（0=不限制）</label>
-                <input type="number" id="like_post_count" placeholder="浏览帖子数量" class="border p-2 w-full rounded text-sm"
-                  value="50" min="0" />
-              </div>
-              <!-- 点赞间隔时间 -->
-              <div>
-                <label class="text-sm text-gray-600 mb-1 block">点赞间隔时间（秒）</label>
-                <div class="flex items-center gap-2">
-                  <input type="number" id="like_interval_min" placeholder="最小值"
-                    class="border p-2 w-full rounded text-sm" value="10" min="0" step="0.1" />
-                  <span class="text-gray-600">~</span>
-                  <input type="number" id="like_interval_max" placeholder="最大值"
-                    class="border p-2 w-full rounded text-sm" value="30" min="0" step="0.1" />
-                </div>
-              </div>
-            </div>
-            <div class="mt-4 space-y-2">
-              <button class="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 cursor-pointer w-full text-sm"
-                onclick="doLike()" id="btn_like_start">
-                开始执行
-              </button>
-              <button class="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600 cursor-pointer w-full text-sm"
-                onclick="stopLikeTask()" id="btn_like_stop" style="display:none;">
-                停止
-              </button>
-            </div>
-          </div>
-
-          <!-- 评论帖子功能 -->
-          <div class="border rounded-lg p-4 bg-gray-50">
-            <h4 class="text-lg font-semibold mb-3 text-center">评论帖子</h4>
-            <div class="space-y-3">
-              <!-- 浏览方式 -->
-              <div>
-                <label class="text-sm text-gray-600 mb-1 block">浏览方式</label>
-                <select id="comment_browse_mode" class="border p-2 w-full rounded text-sm">
-                  <option value="new_post" selected>新发表</option>
-                  <option value="new_reply">新回复</option>
-                  <option value="hot">热门</option>
-                </select>
-              </div>
-              <!-- 评论概率 -->
-              <div>
-                <label class="text-sm text-gray-600 mb-1 block">评论概率</label>
-                <input type="number" id="comment_probability" placeholder="0~1" step="0.1"
-                  class="border p-2 w-full rounded text-sm" value="0.8" min="0" max="1" />
-              </div>
-              <!-- 帖子内容匹配关键词 -->
-              <div>
-                <label class="text-sm text-gray-600 mb-1 block">帖子内容匹配关键词</label>
-                <input type="text" id="comment_post_match" placeholder="关键词，多个用逗号分隔"
-                  class="border p-2 w-full rounded text-sm" />
-              </div>
-              <!-- 时间限制 -->
-              <div>
-                <label class="text-sm text-gray-600 mb-1 block">时间限制（小时，0=不限制）</label>
-                <input type="number" id="comment_time_limit" placeholder="x小时内，0表示不限制"
-                  class="border p-2 w-full rounded text-sm" value="0" min="0" />
-              </div>
-              <!-- 点赞数 -->
-              <div>
-                <label class="text-sm text-gray-600 mb-1 block">点赞数（超过x个，0=无要求）</label>
-                <input type="number" id="comment_like_count" placeholder="点赞数阈值"
-                  class="border p-2 w-full rounded text-sm" value="0" min="0" />
-              </div>
-              <!-- 评论数 -->
-              <div>
-                <label class="text-sm text-gray-600 mb-1 block">评论数（超过x个，0=无要求）</label>
-                <input type="number" id="comment_comment_count" placeholder="评论数阈值"
-                  class="border p-2 w-full rounded text-sm" value="0" min="0" />
-              </div>
-              <!-- 分享数 -->
-              <div>
-                <label class="text-sm text-gray-600 mb-1 block">分享数（超过x个，0=无要求）</label>
-                <input type="number" id="comment_share_count" placeholder="分享数阈值"
-                  class="border p-2 w-full rounded text-sm" value="0" min="0" />
-              </div>
-              <!-- 浏览帖子数量 -->
-              <div>
-                <label class="text-sm text-gray-600 mb-1 block">浏览帖子数量（0=不限制）</label>
-                <input type="number" id="comment_post_count" placeholder="浏览帖子数量"
-                  class="border p-2 w-full rounded text-sm" value="50" min="0" />
-              </div>
-              <!-- 评论间隔时间 -->
-              <div>
-                <label class="text-sm text-gray-600 mb-1 block">评论间隔时间（秒）</label>
-                <div class="flex items-center gap-2">
-                  <input type="number" id="comment_interval_min" placeholder="最小值"
-                    class="border p-2 w-full rounded text-sm" value="10" min="0" step="0.1" />
-                  <span class="text-gray-600">~</span>
-                  <input type="number" id="comment_interval_max" placeholder="最大值"
-                    class="border p-2 w-full rounded text-sm" value="30" min="0" step="0.1" />
-                </div>
-              </div>
-              <!-- 发布者名称 -->
-              <div>
-                <label class="text-sm text-gray-600 mb-1 block">发布者名称（用于检查是否已评论）</label>
-                <input type="text" id="comment_publisher_name" placeholder="发布者名称"
-                  class="border p-2 w-full rounded text-sm" value="" />
-              </div>
-              <!-- 评论内容 -->
-              <div>
-                <label class="text-sm text-gray-600 mb-1 block">评论内容（多个用#分隔，随机选择）</label>
-                <textarea id="comment_content" placeholder="评论内容，多个用#分隔，例如：评论1#评论2#评论3" rows="3"
-                  class="border p-2 w-full rounded text-sm resize-none">🔥#✨️#💤</textarea>
-              </div>
-            </div>
-            <div class="mt-4 space-y-2">
-              <button class="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 cursor-pointer w-full text-sm"
-                onclick="doComment()" id="btn_comment_start">
-                开始执行
-              </button>
-              <button class="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600 cursor-pointer w-full text-sm"
-                onclick="stopCommentTask()" id="btn_comment_stop" style="display:none;">
-                停止
-              </button>
-            </div>
-          </div>
-
-          <!-- 回复帖子功能 -->
-          <div class="border rounded-lg p-4 bg-gray-50">
-            <h4 class="text-lg font-semibold mb-3 text-center">回复帖子</h4>
-            <div class="space-y-3">
-              <!-- 帖子内容匹配关键词 -->
-              <div>
-                <label class="text-sm text-gray-600 mb-1 block">帖子内容匹配关键词</label>
-                <input type="text" id="reply_post_match" placeholder="关键词，多个用逗号分隔"
-                  class="border p-2 w-full rounded text-sm" />
-              </div>
-              <!-- 评论内容匹配关键词 -->
-              <div>
-                <label class="text-sm text-gray-600 mb-1 block">评论内容匹配关键词</label>
-                <input type="text" id="reply_comment_match" placeholder="关键词，多个用逗号分隔"
-                  class="border p-2 w-full rounded text-sm" />
-              </div>
-              <!-- 回复内容 -->
-              <div>
-                <label class="text-sm text-gray-600 mb-1 block">回复内容</label>
-                <textarea id="reply_content" placeholder="回复内容" rows="3"
-                  class="border p-2 w-full rounded text-sm resize-none"></textarea>
-              </div>
-            </div>
-            <div class="mt-4 space-y-2">
-              <button class="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 cursor-pointer w-full text-sm"
-                onclick="doReply()" id="btn_reply_start">
-                开始执行
-              </button>
-              <button class="bg-red-500 text-white px-4 py-2 rounded hover:bg-red-600 cursor-pointer w-full text-sm"
-                onclick="stopReplyTask()" id="btn_reply_stop" style="display:none;">
-                停止
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
+      <div class="flex-1"></div>
+      <button onclick="loginAll()" id="btn_login_all" class="btn btn-primary">一键启动并登录</button>
     </div>
+  </header>
 
-    <!-- 日志输出区域 -->
-    <div class="w-1/5 flex-shrink-0">
-      <!-- 日志输出 -->
-      <div id="log"
-        class="bg-black text-green-400 p-3 rounded-lg overflow-y-auto font-mono text-sm overflow-x-hidden sticky top-6"
-        style="height: calc(100vh - 120px); max-height: calc(100vh - 120px);">
-        日志输出区域...
+  <!-- 满屏自适应：宽度跟着视口走，高度占满剩余一屏。
+       min-h-0 是关键——没有它，flex 子项不会收缩，内部的 overflow 就不生效。 -->
+  <main class="flex-1 min-h-0 w-full px-6 py-6 grid grid-cols-12 gap-6">
+
+    <!-- ---------- 左：抢票人 + 日志 ---------- -->
+    <section class="col-span-12 lg:col-span-4 xl:col-span-3 flex flex-col gap-6 min-w-0 min-h-0">
+      <!-- 固定占左栏 3/5 高度，跟里面有几个人无关。人多了在卡片内部滚。 -->
+      <div class="card flex flex-col min-h-0" style="flex:3 1 0">
+        <div class="hd px-4 h-12 flex items-center justify-between shrink-0">
+          <div class="flex items-baseline gap-2">
+            <h2 class="text-[13px] font-semibold">抢票人</h2>
+            <span id="account_count" class="text-xs" style="color:var(--ink-3)"></span>
+          </div>
+          <div class="flex gap-1.5">
+            <button onclick="toggleSelectMode()" id="btn_select_mode" class="btn btn-sm">选择</button>
+            <button onclick="loadBrowsers()" id="btn_load_browsers" class="btn btn-sm">窗口</button>
+            <button onclick="openAccountModal()" class="btn btn-sm btn-primary">新增</button>
+          </div>
+        </div>
+        <!-- 批量操作条：只在「选择」模式下出现，平时不占地方 -->
+        <!-- 两行布局：左栏窄，三个按钮和「全选 + 计数」挤在一行会把文字压成竖排 -->
+        <div id="batch_bar" class="hidden px-4 py-2 flex flex-col gap-2 shrink-0"
+             style="background:var(--line-2);border-bottom:1px solid var(--line)">
+          <div class="flex items-center gap-2">
+            <label class="flex items-center gap-1.5 text-xs cursor-pointer whitespace-nowrap" style="color:var(--ink-2)">
+              <input type="checkbox" id="select_all" class="w-3.5 h-3.5 accent-black shrink-0" onchange="toggleSelectAll(this)" />
+              <span>全选</span>
+            </label>
+            <span id="selected_count" class="text-xs whitespace-nowrap" style="color:var(--ink-3)"></span>
+          </div>
+          <div class="flex items-center gap-2 flex-wrap">
+            <button onclick="clearLoginSelected()" id="btn_clear_login" class="btn btn-sm whitespace-nowrap" disabled>清除登录态</button>
+            <div class="flex-1"></div>
+            <button onclick="deleteSelected()" id="btn_del_selected" class="btn btn-sm btn-danger whitespace-nowrap" disabled>删除选中</button>
+            <button onclick="deleteAllAccounts()" class="btn btn-sm btn-danger whitespace-nowrap">全部删除</button>
+          </div>
+        </div>
+        <div id="account_list" class="scroll-y flex-1"></div>
+      </div>
+
+      <!-- 日志固定占 2/5，同样不随内容伸缩 -->
+      <div class="card flex flex-col min-h-0" style="flex:2 1 0">
+        <div class="hd px-4 h-10 flex items-center justify-between shrink-0">
+          <h2 class="text-[13px] font-semibold">日志</h2>
+          <button onclick="clearLog()" class="btn btn-sm" style="padding:2px 8px">清空</button>
+        </div>
+        <div id="log" class="scroll-y flex-1 px-4 py-2.5 font-mono text-[11px] leading-[1.7]"></div>
+      </div>
+    </section>
+
+    <!-- ---------- 右 ---------- -->
+    <section class="col-span-12 lg:col-span-8 xl:col-span-9 flex flex-col gap-6 min-w-0 min-h-0">
+
+      <!-- 解析 -->
+      <div class="card shrink-0">
+        <div class="hd px-4 h-12 flex items-center gap-3">
+          <h2 class="text-[13px] font-semibold whitespace-nowrap">票务解析</h2>
+          <input type="text" id="parse_event_url" class="inp flex-1 min-w-0"
+            placeholder="活动详情页链接，或直接填 projectId" />
+          <button onclick="parseEvent()" id="btn_parse" class="btn btn-primary">解析</button>
+          <button onclick="toggleEventDetail()" class="btn btn-sm">明细</button>
+        </div>
+        <div class="px-4 py-3">
+          <div id="event_bar" class="text-[13px]" style="color:var(--ink-2)"></div>
+          <!-- 明细可能很长（18 个票档），限高内部滚，别把解析卡片撑起来 -->
+          <div id="event_detail" class="hidden scroll-y mt-3 pt-3" style="border-top:1px solid var(--line-2);max-height:180px"></div>
+        </div>
+      </div>
+
+      <!-- 配置：flex-1 吃掉中间的剩余高度，这样右栏底边和左栏对齐；
+           人多时表格自己内部滚，不会把「开抢」挤出屏幕 -->
+      <div class="card flex-1 flex flex-col min-h-[200px]">
+        <div class="hd px-4 h-12 flex items-center gap-3 shrink-0">
+          <h2 class="text-[13px] font-semibold whitespace-nowrap">配置每个人抢什么</h2>
+          <span id="plan_summary" class="text-xs" style="color:var(--ink-3)"></span>
+          <div class="flex-1"></div>
+          <span id="plan_save_state" class="text-xs" style="color:var(--ink-3)"></span>
+          <select id="bulk_session" class="inp btn-sm" style="width:auto;max-width:220px;padding:4px 8px">
+            <option value="">批量设置场次…</option>
+          </select>
+          <button onclick="applyBulk()" class="btn btn-sm">应用到全部</button>
+        </div>
+        <div class="scroll-y flex-1 overflow-x-auto">
+          <table class="tb">
+            <thead class="sticky top-0 bg-white z-10">
+              <tr>
+                <th style="width:26px"></th>
+                <th>抢票人</th>
+                <th>场次</th>
+                <th>票档</th>
+                <th style="width:78px">张数</th>
+              </tr>
+            </thead>
+            <tbody id="plan_list"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 开抢 -->
+      <div class="card shrink-0">
+        <div class="hd px-4 h-12 flex items-center gap-2">
+          <h2 class="text-[13px] font-semibold">开抢</h2>
+          <span class="text-xs" style="color:var(--ink-3)">所有账号同时开抢，各按自己的配置</span>
+        </div>
+
+        <div class="px-4 py-4">
+          <div class="grid grid-cols-12 gap-4">
+            <div class="col-span-3">
+              <label class="lbl">重试间隔（秒）</label>
+              <div class="flex items-center gap-1.5">
+                <input type="number" id="ticket_interval_min" step="0.5" value="2" min="0" class="inp" />
+                <span class="text-xs" style="color:var(--ink-3)">~</span>
+                <input type="number" id="ticket_interval_max" step="0.5" value="4" min="0" class="inp" />
+              </div>
+            </div>
+            <div class="col-span-3">
+              <label class="lbl">最大尝试（0 = 不限）</label>
+              <input type="number" id="ticket_max_attempts" value="0" min="0" class="inp" />
+            </div>
+            <div class="col-span-6">
+              <label class="lbl">
+                定时开抢
+                <span id="countdown_hint" class="ml-1.5 font-medium" style="color:var(--ink)"></span>
+              </label>
+              <div class="relative flex items-center gap-1.5">
+                <input type="text" id="ticket_start_at" class="inp cursor-pointer" readonly
+                  placeholder="点击选择日期时间（精确到秒）" onclick="openPicker(event)" onfocus="openPicker(event)" />
+                <button onclick="clearStartAt()" class="btn btn-sm">清除</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="flex items-center gap-5 mt-4 pt-4" style="border-top:1px solid var(--line-2)">
+            <label class="flex items-center gap-2 text-xs cursor-pointer" style="color:var(--ink-2)">
+              <input type="checkbox" id="ticket_auto_confirm" class="w-3.5 h-3.5 accent-black" checked />
+              <span>自动勾选条款并确认订单（锁单，<b style="color:var(--ink)">不付款</b>）</span>
+            </label>
+            <label class="flex items-center gap-2 text-xs cursor-pointer" style="color:var(--ink-2)">
+              <input type="checkbox" id="ticket_stop_others" class="w-3.5 h-3.5 accent-black" />
+              <span>有人抢到就停掉其他人</span>
+            </label>
+            <div class="flex-1"></div>
+            <button onclick="grabTickets(false)" id="btn_grab_now" class="btn btn-primary">立即抢票</button>
+            <button onclick="grabTickets(true)" id="btn_grab_scheduled" class="btn">定时抢票</button>
+            <button onclick="toggleTicketPause()" id="btn_ticket_pause" data-state="running" style="display:none" class="btn">暂停</button>
+            <button onclick="stopTicketTask()" id="btn_ticket_stop" style="display:none" class="btn btn-danger">停止</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- 抢票人弹窗 -->
+  <div id="account_modal" class="fixed inset-0 z-40 hidden items-center justify-center p-4" style="background:rgba(0,0,0,.35)">
+    <div class="card w-full max-w-md" style="border-radius:8px">
+      <div class="hd px-5 h-12 flex items-center justify-between">
+        <h3 id="modal_title" class="text-[13px] font-semibold">新增抢票人</h3>
+        <button onclick="closeAccountModal()" class="text-lg leading-none" style="color:var(--ink-3)">&times;</button>
+      </div>
+      <div class="px-5 py-4 space-y-3.5">
+        <div><label class="lbl">账号（邮箱）</label><input type="text" id="m_email" class="inp" /></div>
+        <div><label class="lbl">密码</label><input type="text" id="m_password" class="inp font-mono" /></div>
+        <div><label class="lbl">备注（选填）</label><input type="text" id="m_remark" class="inp" placeholder="列表里用来区分，比如「老王」" /></div>
+        <div>
+          <label class="lbl">浏览器窗口</label>
+          <select id="m_browser" class="inp"></select>
+          <p class="text-[11px] mt-1.5" style="color:var(--ink-3)">每人必须用独立窗口，共用会导致登录信息互相覆盖</p>
+        </div>
+        <div id="modal_error" class="text-xs hidden" style="color:#dc2626"></div>
+      </div>
+      <div class="hd px-5 h-12 flex items-center justify-end gap-2" style="border-bottom:none;border-top:1px solid var(--line)">
+        <button onclick="closeAccountModal()" class="btn">取消</button>
+        <button onclick="submitAccountModal()" id="m_submit" class="btn btn-primary">保存</button>
       </div>
     </div>
   </div>
 
+  <!-- 日期时间选择面板 -->
+  <div id="dtp" class="dtp hidden">
+    <div class="dtp-hd">
+      <span class="text-[13px] font-semibold">定时开抢</span>
+      <span id="dtp_preview" class="text-[12px] font-mono flex-1 truncate" style="color:var(--ink-2)"></span>
+      <button onclick="closePicker()" class="btn btn-sm">取消</button>
+      <button onclick="dtpConfirm()" class="btn btn-sm btn-primary">确定</button>
+    </div>
+    <div class="grid grid-cols-[1.7fr_.8fr_.8fr_.8fr] px-3 pt-2 text-[11px] text-center" style="color:var(--ink-3)">
+      <div>日期</div>
+      <div>时</div>
+      <div>分</div>
+      <div>秒</div>
+    </div>
+    <div class="dtp-wheel-wrap">
+      <div id="dtp_date" class="dtp-wheel"></div>
+      <div id="dtp_h" class="dtp-wheel"></div>
+      <div id="dtp_m" class="dtp-wheel"></div>
+      <div id="dtp_s" class="dtp-wheel"></div>
+    </div>
+    <div class="dtp-foot">
+      <div class="flex-1"></div>
+      <button onclick="dtpNow()" class="btn btn-sm">此刻</button>
+      <button onclick="dtpQuick(5)" class="btn btn-sm">+5分</button>
+      <button onclick="dtpTodayAt(13)" class="btn btn-sm">今天13:00</button>
+    </div>
+  </div>
+
   <script>
-    // 存储频道表格数据
-    let channelTableData = [];
+    // ==================== 全局状态 ====================
+    let currentTaskId = null, currentTicketTaskId = null;
+    let logEventSource = null, countdownElement = null;
+    let isGlobalMode = false;
+    let accounts = [], browsersCache = [], eventData = {}, plans = {};
+    let loginStatus = {}, editingId = null;
 
-    // 全选/取消全选
-    function toggleSelectAll(checkbox) {
-      const checkboxes = document.querySelectorAll('tbody input[type="checkbox"]');
-      checkboxes.forEach(cb => cb.checked = checkbox.checked);
-    }
+    // ==================== 日志 ====================
+    function appendLog(message, level = "info") {
+      const box = document.getElementById("log");
+      // 只有滚到底时才自动跟随，否则用户正在往回翻会被强行拽回来
+      const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
+      const isCd = message.includes("[COUNTDOWN]");
 
-    // 创建表格
-    function createChannelTable(channels) {
-      const container = document.getElementById("joined_table_container");
-      container.innerHTML = "";
-
-      if (channels.length === 0) {
-        container.textContent = "未找到已加入的频道";
-        return;
-      }
-
-      // 创建表格
-      const table = document.createElement('table');
-      table.className = 'w-full border-collapse';
-      table.style.fontSize = '14px';
-      table.style.minWidth = '1200px'; // 确保表格有足够宽度显示所有列
-
-      // 创建表头
-      const thead = document.createElement('thead');
-      thead.style.position = 'sticky';
-      thead.style.top = '0';
-      thead.style.zIndex = '20';
-      thead.style.backgroundColor = '#e5e7eb';
-      const headerRow = document.createElement('tr');
-
-      const headers = [
-        { text: '', width: '30px', class: 'select-all' },
-        { text: '序号', width: '50px' },
-        { text: '频道名称', width: '200px' },
-        { text: '发布内容', width: '150px' },
-        { text: '发布图片', width: '120px' },
-        { text: '帖子匹配', width: '100px' },
-        { text: '点赞概率', width: '80px' },
-        { text: '评论内容', width: '150px' },
-        { text: '评论匹配', width: '100px' },
-        { text: '回复内容', width: '150px' }
-      ];
-
-      headers.forEach(header => {
-        const th = document.createElement('th');
-        th.className = 'border p-2 text-center font-semibold';
-        th.style.width = header.width;
-        th.style.backgroundColor = '#e5e7eb';
-        th.style.boxShadow = '0 2px 2px -1px rgba(0, 0, 0, 0.1)'; // 添加阴影以更好遮住后面的内容
-
-        if (header.class === 'select-all') {
-          const checkbox = document.createElement('input');
-          checkbox.type = 'checkbox';
-          checkbox.onchange = (e) => toggleSelectAll(e.target);
-          checkbox.style.margin = '0 auto';
-          checkbox.style.display = 'block';
-          th.appendChild(checkbox);
+      if (isCd) {
+        // 倒计时原地刷新，不往下堆
+        message = message.replace("[COUNTDOWN]", "").trim();
+        if (countdownElement) {
+          countdownElement.innerHTML = `<span style="color:var(--ink-3)">${countdownElement.dataset.ts}</span> <span style="color:var(--ink)">${escapeHtml(message)}</span>`;
         } else {
-          th.textContent = header.text;
+          const ts = `${new Date().toLocaleTimeString()}`;
+          countdownElement = document.createElement("div");
+          countdownElement.dataset.ts = ts;
+          countdownElement.innerHTML = `<span style="color:var(--ink-3)">${ts}</span> <span style="color:var(--ink)">${escapeHtml(message)}</span>`;
+          box.appendChild(countdownElement);
         }
-
-        headerRow.appendChild(th);
-      });
-
-      thead.appendChild(headerRow);
-      table.appendChild(thead);
-
-      // 创建表体
-      const tbody = document.createElement('tbody');
-
-      // 初始化或更新表格数据
-      if (channelTableData.length === 0 || channelTableData.length !== channels.length) {
-        channelTableData = channels.map((name, index) => ({
-          index: index + 1,
-          channelName: name,
-          publishContent: '',
-          publishImage: '',
-          postMatch: '',
-          likeProbability: '',
-          commentContent: '',
-          commentMatch: '',
-          replyContent: ''
-        }));
       } else {
-        // 更新频道名称（如果列表变化了）
-        channels.forEach((name, index) => {
-          if (channelTableData[index]) {
-            channelTableData[index].channelName = name;
-          }
-        });
+        if (countdownElement) { countdownElement.remove(); countdownElement = null; }
+        const ts = new Date().toLocaleTimeString();
+        const el = document.createElement("div");
+        // 白底日志：错误用红，警告用主色加粗，普通用次级灰
+        let c = "var(--ink-2)", w = "400";
+        if (level === "error") { c = "#dc2626"; }
+        else if (level === "warning") { c = "var(--ink)"; w = "500"; }
+        el.innerHTML = `<span style="color:var(--ink-3)">${ts}</span> <span style="color:${c};font-weight:${w}">${escapeHtml(message)}</span>`;
+        box.appendChild(el);
       }
+      if (atBottom) box.scrollTop = box.scrollHeight;
+    }
 
-      channelTableData.forEach((rowData, index) => {
-        const row = document.createElement('tr');
-        row.className = 'hover:bg-gray-100';
-        row.dataset.index = index;
+    function escapeHtml(t) { const d = document.createElement("div"); d.textContent = t == null ? "" : t; return d.innerHTML; }
 
-        // 复选框列
-        const tdCheckbox = document.createElement('td');
-        tdCheckbox.className = 'border p-1 text-center';
-        const checkbox = document.createElement('input');
-        checkbox.type = 'checkbox';
-        checkbox.className = 'row-checkbox';
-        tdCheckbox.appendChild(checkbox);
-        row.appendChild(tdCheckbox);
+    function clearLog() {
+      document.getElementById("log").innerHTML = "";
+      countdownElement = null;
+    }
 
-        // 序号列
-        const tdIndex = document.createElement('td');
-        tdIndex.className = 'border p-1 text-center';
-        tdIndex.textContent = rowData.index;
-        row.appendChild(tdIndex);
+    function initGlobalLogStream() {
+      if (logEventSource) logEventSource.close();
+      const es = new EventSource(`/ticket/logs_stream`);
+      logEventSource = es; isGlobalMode = true; setupSSE(es);
+    }
 
-        // 频道名称列（不可编辑，从接口获取）
-        const tdChannelName = document.createElement('td');
-        tdChannelName.className = 'border p-1';
-        tdChannelName.textContent = rowData.channelName;
-        tdChannelName.style.fontWeight = '500';
-        tdChannelName.style.textAlign = 'center';
-        row.appendChild(tdChannelName);
-
-        // 可编辑列
-        const editableFields = [
-          'publishContent', 'publishImage',
-          'postMatch', 'likeProbability',
-          'commentContent', 'commentMatch',
-          'replyContent'
-        ];
-
-        editableFields.forEach(field => {
-          const td = document.createElement('td');
-          td.className = 'border p-1';
-          td.contentEditable = true;
-          td.textContent = rowData[field] || '';
-          td.style.minHeight = '30px';
-          td.style.outline = 'none';
-          td.style.wordBreak = 'break-word';
-          td.addEventListener('focus', (e) => {
-            e.target.style.backgroundColor = '#fef3c7';
-          });
-          td.addEventListener('blur', (e) => {
-            rowData[field] = e.target.textContent.trim();
-            e.target.style.backgroundColor = '';
-          });
-          row.appendChild(td);
-        });
-
-        tbody.appendChild(row);
+    function setupSSE(es) {
+      es.addEventListener("message", ev => {
+        try {
+          const d = JSON.parse(ev.data);
+          if (d.type === "log") {
+            const e = d.data;
+            if (isGlobalMode && currentTaskId && e.task_id === currentTaskId) return;
+            appendLog(e.message, e.level);
+            if (e.message.includes("抢票完成，成功账号") || e.message.includes("抢票结束，所有账号均未成功")) {
+              setTimeout(() => {
+                if (currentTicketTaskId) {
+                  resetTicketButtons();
+                  if (currentTaskId === currentTicketTaskId) stopLogPolling();
+                  currentTicketTaskId = null;
+                }
+              }, 500);
+            }
+            if (e.message.includes("一键登录结束") || e.message.includes("所有账号都已登录")) {
+              setTimeout(refreshLoginStatus, 800);
+            }
+          } else if (d.type === "end" || d.type === "timeout") {
+            appendLog(d.message || "日志流结束", "warning"); stopLogPolling();
+          } else if (d.type === "error") {
+            appendLog(`错误: ${d.message}`, "error");
+          }
+        } catch (err) { console.error(err); }
       });
-
-      table.appendChild(tbody);
-      container.appendChild(table);
+      es.addEventListener("error", () => { if (es.readyState === EventSource.CLOSED) stopLogPolling(); });
     }
 
-    // 加载已加入频道列表
-    function loadJoinedList() {
-      const loading = document.getElementById("joined_loading");
-      const container = document.getElementById("joined_table_container");
-      
-      // 获取浏览器ID
-      const browser_id = document.getElementById("browser_id").value.trim();
-      if (!browser_id) {
-        appendLog("请输入浏览器ID", "error");
-        return;
+    function startLogPolling(taskId) {
+      currentTaskId = taskId; countdownElement = null;
+      if (logEventSource) logEventSource.close();
+      const es = new EventSource(`/ticket/logs_stream?task_id=${taskId}`);
+      logEventSource = es; isGlobalMode = false; setupSSE(es);
+    }
+
+    function stopLogPolling() {
+      const wasTask = !isGlobalMode;
+      if (logEventSource) { logEventSource.close(); logEventSource = null; }
+      currentTaskId = null; isGlobalMode = false;
+      if (wasTask) setTimeout(initGlobalLogStream, 100);
+    }
+
+    // ==================== 抢票人 ====================
+    const ST = {
+      logged_in:     { dot: "dot-on",   text: "已登录",   dim: false },
+      logged_out:    { dot: "dot-off",  text: "未登录",   dim: true },
+      window_closed: { dot: "dot-idle", text: "窗口未开", dim: true },
+      no_window:     { dot: "dot-err",  text: "未绑窗口", dim: true },
+      error:         { dot: "dot-err",  text: "异常",     dim: true },
+      unknown:       { dot: "dot-idle", text: "—",        dim: true },
+    };
+
+    function loadAccounts() {
+      return fetch("/ticket/accounts").then(r => r.json()).then(d => {
+        if (d.code === 200) { accounts = d.accounts || []; renderAccounts(); renderPlans(); }
+        else appendLog(d.result, "error");
+      }).catch(e => appendLog(`加载抢票人失败: ${e.message}`, "error"));
+    }
+
+    function renderAccounts() {
+      const box = document.getElementById("account_list");
+      document.getElementById("account_count").textContent = accounts.length ? `${accounts.length}` : "";
+      box.innerHTML = "";
+      if (!accounts.length) {
+        box.innerHTML = `<div class="px-4 py-10 text-center text-[13px]" style="color:var(--ink-3)">
+          还没有抢票人<br><span class="text-[11px]">点右上角「新增」</span></div>`;
+        updateStatusSummary(); return;
       }
+      accounts.forEach((a, i) => {
+        const st = ST[(loginStatus[a.id] || {}).status] || ST.unknown;
+        const win = browsersCache.find(b => b.id === a.browser_id);
+        const winLabel = win ? `#${win.seq} ${win.name}` : (a.browser_id ? "窗口未加载" : "未绑定");
+        const row = document.createElement("div");
+        row.className = "px-4 py-2.5 group hover:bg-zinc-50";
+        row.dataset.accId = a.id;
+        if (i) row.style.borderTop = "1px solid var(--line-2)";
+        row.innerHTML = `
+          <div class="flex items-center gap-2">
+            <input type="checkbox" class="acc-check w-3.5 h-3.5 accent-black ${selectMode ? "" : "hidden"}"
+                   value="${escapeHtml(a.id)}" onchange="updateSelectedCount()" />
+            <span class="dot ${st.dot}" title="${escapeHtml((loginStatus[a.id]||{}).detail || st.text)}"></span>
+            <span class="text-[13px] font-medium truncate flex-1">${escapeHtml(a.remark || a.email)}</span>
+            <span class="text-[11px]" style="color:var(--${st.dim ? 'ink-3' : 'ink'})">${st.text}</span>
+            <button class="btn btn-sm edit-btn opacity-0 group-hover:opacity-100" style="padding:1px 6px">改</button>
+            <button class="btn btn-sm btn-danger del-btn opacity-0 group-hover:opacity-100" style="padding:1px 6px">删</button>
+          </div>
+          <div class="flex items-center gap-1.5 mt-1 text-[11px] ${selectMode ? "pl-9" : "pl-3.5"}" style="color:var(--ink-3)">
+            <span class="truncate">${escapeHtml(a.email)}</span><span>·</span>
+            <span class="truncate" ${a.browser_id ? "" : 'style="color:#ef4444"'}>${escapeHtml(winLabel)}</span>
+          </div>`;
+        row.querySelector(".edit-btn").onclick = () => openAccountModal(a.id);
+        row.querySelector(".del-btn").onclick = () => deleteAccount(a.id, a.remark || a.email);
+        box.appendChild(row);
+      });
+      updateStatusSummary();
+    }
 
-      loading.style.display = "inline";
+    function updateStatusSummary() {
+      const el = document.getElementById("status_summary");
+      if (!accounts.length) { el.textContent = "—"; return; }
+      const n = accounts.filter(a => (loginStatus[a.id] || {}).status === "logged_in").length;
+      const known = accounts.filter(a => loginStatus[a.id]).length;
+      el.innerHTML = known
+        ? `<b style="color:var(--ink)">${n}</b><span style="color:var(--ink-3)"> / ${accounts.length} 已登录</span>`
+        : `<span style="color:var(--ink-3)">${accounts.length} 人 · 状态未知</span>`;
+    }
 
-      fetch('/qq/joined_channels', {
-        method: "POST",
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          browser_id: browser_id
-        })
-      })
-        .then(res => res.json())
-        .then(data => {
-          loading.style.display = "none";
-          if (data.code === 200 && Array.isArray(data.result)) {
-            createChannelTable(data.result);
-            // 加载频道列表成功后，自动获取用户名称
-            getUserName();
-          } else {
-            container.textContent = `加载失败: ${data.result || '未知错误'}`;
-          }
-        })
-        .catch(err => {
-          loading.style.display = "none";
-          container.textContent = `请求失败: ${err.message}`;
+    function openAccountModal(id = null) {
+      editingId = id;
+      const a = id ? accounts.find(x => x.id === id) : null;
+      document.getElementById("modal_title").textContent = a ? "编辑抢票人" : "新增抢票人";
+      document.getElementById("m_email").value = a ? a.email : "";
+      document.getElementById("m_password").value = a ? a.password : "";
+      document.getElementById("m_remark").value = a ? a.remark : "";
+      document.getElementById("modal_error").classList.add("hidden");
+      const sel = document.getElementById("m_browser");
+      sel.innerHTML = browsersCache.length
+        ? '<option value="">— 未绑定 —</option>' + browsersCache.map(b => {
+            const taken = accounts.find(x => x.id !== id && x.browser_id === b.id);
+            const label = `#${b.seq ?? "?"} ${b.name || "(未命名)"}` + (taken ? `（已被 ${taken.remark || taken.email} 占用）` : "");
+            return `<option value="${escapeHtml(b.id)}"${taken ? " disabled" : ""}${a && a.browser_id === b.id ? " selected" : ""}>${escapeHtml(label)}</option>`;
+          }).join("")
+        : '<option value="">先点左上角「窗口」加载列表</option>';
+      const m = document.getElementById("account_modal");
+      m.classList.remove("hidden"); m.classList.add("flex");
+      document.getElementById("m_email").focus();
+    }
+
+    function closeAccountModal() {
+      const m = document.getElementById("account_modal");
+      m.classList.add("hidden"); m.classList.remove("flex"); editingId = null;
+    }
+
+    function submitAccountModal() {
+      const payload = {
+        email: document.getElementById("m_email").value.trim(),
+        password: document.getElementById("m_password").value,
+        remark: document.getElementById("m_remark").value.trim(),
+        browser_id: document.getElementById("m_browser").value,
+      };
+      if (editingId) payload.id = editingId;
+      const err = document.getElementById("modal_error");
+      if (!payload.email || !payload.password) {
+        err.textContent = "账号和密码都是必填的"; err.classList.remove("hidden"); return;
+      }
+      const btn = document.getElementById("m_submit");
+      btn.disabled = true; btn.textContent = "保存中…";
+      fetch("/ticket/accounts/save", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
+        .then(r => r.json()).then(d => {
+          if (d.code === 200) { closeAccountModal(); appendLog(editingId ? "抢票人已更新" : "抢票人已新增"); loadAccounts(); }
+          else { err.textContent = d.result || "保存失败"; err.classList.remove("hidden"); }
+        }).catch(e => { err.textContent = e.message; err.classList.remove("hidden"); })
+        .finally(() => { btn.disabled = false; btn.textContent = "保存"; });
+    }
+
+    function deleteAccount(id, label) {
+      if (!confirm(`确定删除「${label}」？他的抢票配置也会一并删除。`)) return;
+      fetch("/ticket/accounts/delete", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id }) })
+        .then(r => r.json()).then(d => {
+          appendLog(d.result, d.code === 200 ? "warning" : "error");
+          if (d.code === 200) { delete loginStatus[id]; loadAccounts(); }
         });
     }
+
+    // ---------- 批量选择 / 删除 ----------
+    let selectMode = false;
+
+    function toggleSelectMode() {
+      selectMode = !selectMode;
+      document.getElementById("batch_bar").classList.toggle("hidden", !selectMode);
+      document.getElementById("btn_select_mode").textContent = selectMode ? "取消" : "选择";
+      document.getElementById("btn_select_mode").classList.toggle("btn-primary", selectMode);
+      document.getElementById("select_all").checked = false;
+      renderAccounts();
+      updateSelectedCount();
+    }
+
+    function toggleSelectAll(master) {
+      document.querySelectorAll(".acc-check").forEach(c => { c.checked = master.checked; });
+      updateSelectedCount();
+    }
+
+    function selectedIds() {
+      return [...document.querySelectorAll(".acc-check:checked")].map(c => c.value);
+    }
+
+    function updateSelectedCount() {
+      const n = selectedIds().length;
+      const total = document.querySelectorAll(".acc-check").length;
+      document.getElementById("selected_count").textContent = n ? `已选 ${n}` : "";
+      document.getElementById("btn_del_selected").disabled = n === 0;
+      document.getElementById("btn_clear_login").disabled = n === 0;
+      const master = document.getElementById("select_all");
+      master.checked = n > 0 && n === total;
+      master.indeterminate = n > 0 && n < total;   // 部分选中时显示横杠
+    }
+
+    // 渲染后恢复"全选"状态，否则重渲染会让计数和勾选框对不上
+    function updatePlanSelectAll() { if (selectMode) updateSelectedCount(); }
+
+    function deleteSelected() {
+      const ids = selectedIds();
+      if (!ids.length) return;
+      const names = accounts.filter(a => ids.includes(a.id)).map(a => a.remark || a.email);
+      if (!confirm(`确定删除这 ${ids.length} 个抢票人？\n\n${names.join("、")}\n\n他们的抢票配置也会一并删除。`)) return;
+      batchDelete(ids);
+    }
+
+    function deleteAllAccounts() {
+      if (!accounts.length) return;
+      if (!confirm(`确定删除全部 ${accounts.length} 个抢票人？所有抢票配置也会一并清空。`)) return;
+      batchDelete(accounts.map(a => a.id));
+    }
+
+    function batchDelete(ids) {
+      fetch("/ticket/accounts/delete_batch", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids })
+      }).then(r => r.json()).then(d => {
+        appendLog(d.result, d.code === 200 ? "warning" : "error");
+        if (d.code === 200) {
+          ids.forEach(id => delete loginStatus[id]);
+          if (selectMode) toggleSelectMode();   // 删完退出选择模式
+          else loadAccounts();
+        }
+      }).catch(e => appendLog(`批量删除失败: ${e.message}`, "error"));
+    }
+
+    // 手动清除登录态。正常换人时后端会按窗口归属自动清，这里是人工兜底：
+    // 窗口被风控盯上想推倒重来、或者就是想让某个人重新登一次。
+    function clearLoginSelected() {
+      const ids = selectedIds();
+      if (!ids.length) return;
+      const names = accounts.filter(a => ids.includes(a.id)).map(a => a.remark || a.email);
+      if (!confirm(
+        `确定清除这 ${ids.length} 个人所绑定窗口的登录态？\n\n${names.join("、")}\n\n` +
+        `窗口会被关闭，Cookie 和本地存储一并清空。\n下次登录需要重新处理验证码。`
+      )) return;
+
+      const btn = document.getElementById("btn_clear_login");
+      btn.disabled = true; btn.textContent = "清除中…";
+      fetch("/ticket/accounts/clear_login", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids })
+      }).then(r => r.json()).then(d => {
+        appendLog(d.result, d.code === 200 ? "warning" : "error");
+        if (d.code === 200) ids.forEach(id => delete loginStatus[id]);
+        renderAccounts();
+      }).catch(e => appendLog(`清除登录态失败: ${e.message}`, "error"))
+        .finally(() => { btn.textContent = "清除登录态"; updateSelectedCount(); });
+    }
+
+    function refreshLoginStatus() {
+      if (!accounts.length) return Promise.resolve();
+      const btn = document.getElementById("btn_refresh_status");
+      btn.disabled = true; btn.textContent = "查询中…";
+      return fetch("/ticket/login_status").then(r => r.json()).then(d => {
+        if (d.code === 200) {
+          loginStatus = {};
+          (d.statuses || []).forEach(s => { loginStatus[s.account_id] = s; });
+          renderAccounts(); renderPlans();
+        } else appendLog(d.result, "error");
+      }).catch(e => appendLog(`查询登录状态失败: ${e.message}`, "error"))
+        .finally(() => { btn.disabled = false; btn.textContent = "刷新状态"; });
+    }
+
+    function loadBrowsers() {
+      const btn = document.getElementById("btn_load_browsers");
+      btn.disabled = true; btn.textContent = "…";
+      return fetch("/ticket/browsers").then(r => r.json()).then(d => {
+        if (d.code === 200) { browsersCache = d.browsers || []; renderAccounts(); }
+        else appendLog(d.result, "error");
+      }).catch(e => appendLog(`加载窗口失败: ${e.message}`, "error"))
+        .finally(() => { btn.disabled = false; btn.textContent = "窗口"; });
+    }
+
+    function loginAll() {
+      const btn = document.getElementById("btn_login_all");
+      btn.disabled = true; btn.textContent = "登录中…";
+      fetch("/ticket/login_all", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ wait_captcha_seconds: 180 }) })
+        .then(r => r.json()).then(d => {
+          if (d.task_id) startLogPolling(d.task_id);
+          appendLog(d.result, d.code === 200 ? "info" : "error");
+        }).catch(e => appendLog(`一键登录失败: ${e.message}`, "error"))
+        .finally(() => { btn.disabled = false; btn.textContent = "一键启动并登录"; });
+    }
+
+    // ==================== 解析 ====================
+    function loadEvent() {
+      return fetch("/ticket/event").then(r => r.json()).then(d => {
+        if (d.code === 200 && d.event && d.event.sessions) { eventData = d.event; renderEventBar(); renderPlans(); }
+      }).catch(() => { });
+    }
+
+    function parseEvent() {
+      const url = document.getElementById("parse_event_url").value.trim();
+      if (!url) { appendLog("请填写活动链接或 projectId", "error"); return; }
+      const btn = document.getElementById("btn_parse");
+      btn.disabled = true; btn.textContent = "解析中…";
+      fetch("/ticket/parse_event", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ event_url: url }) })
+        .then(r => r.json()).then(d => {
+          appendLog(d.result, d.code === 200 ? "info" : "error");
+          if (d.code === 200) { eventData = d.event || {}; renderEventBar(); renderPlans(); }
+        }).catch(e => appendLog(`解析失败: ${e.message}`, "error"))
+        .finally(() => { btn.disabled = false; btn.textContent = "解析"; });
+    }
+
+    function renderEventBar() {
+      const bar = document.getElementById("event_bar");
+      if (!eventData.sessions || !eventData.sessions.length) {
+        bar.innerHTML = `<span style="color:var(--ink-3)">还没有解析结果</span>`; return;
+      }
+      const total = eventData.sessions.reduce((n, s) => n + s.tiers.length, 0);
+      const avail = eventData.sessions.reduce((n, s) => n + s.tiers.filter(t => t.available).length, 0);
+      bar.innerHTML = `<b style="color:var(--ink)">${escapeHtml(eventData.name)}</b>
+        <span style="color:var(--ink-3)"> · ${eventData.sessions.length} 场次 / ${total} 票档 · </span>
+        <b>${avail ? avail + " 个可买" : "全部售罄"}</b>`;
+      if (!document.getElementById("parse_event_url").value) {
+        document.getElementById("parse_event_url").value = eventData.event_url || "";
+      }
+      renderEventDetail(); fillBulkSession();
+    }
+
+    function renderEventDetail() {
+      const box = document.getElementById("event_detail");
+      if (!eventData.sessions) return;
+      box.innerHTML = eventData.sessions.map(s => `
+        <div class="mb-2.5">
+          <div class="text-[12px] font-medium" ${s.sell_out ? 'style="color:var(--ink-3)"' : ""}>
+            ${escapeHtml(s.text)}${s.sell_out ? ' <span class="text-[11px]">· 整场售罄</span>' : ""}
+          </div>
+          <div class="flex flex-wrap gap-1.5 mt-1.5">
+            ${s.tiers.map(t => `<span class="tag ${t.available ? "" : "tag-out"}">${escapeHtml(t.text)}</span>`).join("")}
+          </div>
+        </div>`).join("");
+    }
+
+    function toggleEventDetail() { document.getElementById("event_detail").classList.toggle("hidden"); }
+
+    // ==================== 配置 ====================
+    function loadPlans() {
+      return fetch("/ticket/plans").then(r => r.json()).then(d => {
+        if (d.code === 200) { plans = d.plans || {}; renderPlans(); }
+      }).catch(() => { });
+    }
+
+    function fillBulkSession() {
+      const sel = document.getElementById("bulk_session");
+      sel.innerHTML = '<option value="">批量设置场次…</option>' +
+        (eventData.sessions || []).map(s => `<option value="${escapeHtml(s.text)}"${s.sell_out ? " disabled" : ""}>${escapeHtml(s.text)}${s.sell_out ? "（售罄）" : ""}</option>`).join("");
+    }
+
+    function renderPlans() {
+      const box = document.getElementById("plan_list");
+      const sum = document.getElementById("plan_summary");
+      box.innerHTML = "";
+      if (!accounts.length) {
+        box.innerHTML = `<tr><td colspan="5" class="text-center py-10 text-[13px]" style="color:var(--ink-3)">先在左边添加抢票人</td></tr>`;
+        sum.textContent = ""; return;
+      }
+      if (!eventData.sessions || !eventData.sessions.length) {
+        box.innerHTML = `<tr><td colspan="5" class="text-center py-10 text-[13px]" style="color:var(--ink-3)">先解析活动，这里才能选场次和票档</td></tr>`;
+        sum.textContent = ""; return;
+      }
+      let configured = 0;
+      accounts.forEach(a => {
+        const plan = plans[a.id] || {};
+        if (plan.session_text && plan.tier_text) configured++;
+        const st = ST[(loginStatus[a.id] || {}).status] || ST.unknown;
+        const tr = document.createElement("tr");
+        tr.dataset.accountId = a.id;
+        tr.innerHTML = `
+          <td><span class="dot ${st.dot}" title="${st.text}"></span></td>
+          <td>
+            <div class="text-[13px] font-medium truncate" style="max-width:150px">${escapeHtml(a.remark || a.email)}</div>
+            <div class="text-[11px] truncate" style="max-width:150px;color:var(--ink-3)">${escapeHtml(a.email)}</div>
+          </td>
+          <td><select class="inp plan-session"></select></td>
+          <td><select class="inp plan-tier"></select></td>
+          <td><input type="number" min="1" value="${plan.quantity || 1}" class="inp plan-qty" style="width:64px" /></td>`;
+        box.appendChild(tr);
+        const ss = tr.querySelector(".plan-session"), ts = tr.querySelector(".plan-tier");
+        // 售罄的场次/票档**照样可选**，只加文字标记。
+        // 抢回流票就是要预先配好一个当前售罄的票档，然后让程序一直轮询，
+        // 等别人退票放出来的那一刻抢进去。禁选的话这个场景根本没法配。
+        ss.innerHTML = '<option value="">— 场次 —</option>' + eventData.sessions.map(s =>
+          `<option value="${escapeHtml(s.text)}"${s.text === plan.session_text ? " selected" : ""}>${escapeHtml(s.text)}${s.sell_out ? " · 售罄" : ""}</option>`).join("");
+        const fill = () => {
+          const s = eventData.sessions.find(x => x.text === ss.value);
+          ts.innerHTML = '<option value="">— 票档 —</option>' + (s ? s.tiers : []).map(t =>
+            `<option value="${escapeHtml(t.text)}"${t.text === plan.tier_text ? " selected" : ""}>${escapeHtml(t.text)}${t.available ? "" : " · 售罄"}</option>`).join("");
+          markSoldOut(tr);
+        };
+        fill();
+        ss.onchange = () => { fill(); autoSavePlans(); };
+        // 改票档要同时刷新售罄提示，不然选中售罄票档后看不出虚线标记
+        ts.onchange = () => { markSoldOut(tr); autoSavePlans(); };
+        tr.querySelector(".plan-qty").oninput = autoSavePlans;
+      });
+      sum.textContent = `${configured}/${accounts.length} 已配置`;
+      updatePlanSelectAll();
+    }
+
+    // 选中售罄票档时给个视觉提示（虚线边框），但不阻止选择——
+    // 这是"等回流票"的合法配置，只是要让人一眼看出这行现在抢不到、在等放票
+    function markSoldOut(tr) {
+      const ts = tr.querySelector(".plan-tier");
+      const opt = ts.options[ts.selectedIndex];
+      const isOut = opt && opt.textContent.includes("· 售罄");
+      ts.style.borderStyle = isOut ? "dashed" : "solid";
+      ts.style.borderColor = isOut ? "var(--ink-3)" : "";
+      ts.title = isOut ? "该票档当前售罄。抢票会持续轮询，等有人退票放出来时抢入" : "";
+    }
+
+    function applyBulk() {
+      const v = document.getElementById("bulk_session").value;
+      if (!v) { appendLog("请先在下拉里选一个场次", "error"); return; }
+      document.querySelectorAll("#plan_list tr[data-account-id]").forEach(tr => {
+        const ss = tr.querySelector(".plan-session");
+        ss.value = v; ss.dispatchEvent(new Event("change"));
+        const ts = tr.querySelector(".plan-tier");
+        // 优先挑还有票的票档；全售罄时也挑第一个（等回流），不留空
+        const opts = [...ts.options].filter(o => o.value);
+        const pick = opts.find(o => !o.textContent.includes("· 售罄")) || opts[0];
+        if (pick) { ts.value = pick.value; markSoldOut(tr); }
+      });
+      autoSavePlans();
+      appendLog(`已把全部抢票人设为「${v}」`);
+    }
+
+    // 配置改动即存。抢票场景下"忘了点保存"的代价太大——开抢那一刻才发现
+    // 配置没生效就来不及了，所以不让保存这件事依赖人的记性。
+    let planSaveTimer = null;
+    function autoSavePlans(silent = true) {
+      clearTimeout(planSaveTimer);
+      setPlanSaveState("saving");
+      planSaveTimer = setTimeout(() => {
+        const out = {};
+        document.querySelectorAll("#plan_list tr[data-account-id]").forEach(tr => {
+          out[tr.dataset.accountId] = {
+            session_text: tr.querySelector(".plan-session").value,
+            tier_text: tr.querySelector(".plan-tier").value,
+            quantity: parseInt(tr.querySelector(".plan-qty").value) || 1,
+          };
+        });
+        fetch("/ticket/plans/save", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ plans: out }) })
+          .then(r => r.json()).then(d => {
+            if (d.code === 200) {
+              plans = out;
+              setPlanSaveState("saved");
+              // 只更新计数，不整表重渲染——重渲染会打断正在操作的下拉框
+              const n = Object.values(out).filter(p => p.session_text && p.tier_text).length;
+              document.getElementById("plan_summary").textContent = `${n}/${accounts.length} 已配置`;
+              if (!silent) appendLog(d.result);
+            } else {
+              setPlanSaveState("error");
+              appendLog(d.result || "保存配置失败", "error");
+            }
+          }).catch(e => { setPlanSaveState("error"); appendLog(`保存配置失败: ${e.message}`, "error"); });
+      }, 500);
+    }
+
+    function setPlanSaveState(s) {
+      const el = document.getElementById("plan_save_state");
+      if (!el) return;
+      if (s === "saving") { el.textContent = "保存中…"; el.style.color = "var(--ink-3)"; }
+      else if (s === "saved") {
+        el.textContent = "已保存"; el.style.color = "var(--ink-2)";
+        clearTimeout(el.__t); el.__t = setTimeout(() => { el.textContent = ""; }, 2000);
+      } else { el.textContent = "保存失败"; el.style.color = "#dc2626"; }
+    }
+
+    // ==================== 日期时间选择器 ====================
+    // iOS 风格滚轮。输入框为空时也先落到 5 分钟后，避免没有基础时间导致时分秒列不可操作。
+    let dtpSel = null;
+    let dtpScrollTimers = {};
+    const DTP_ITEM_H = 32;
+    const DTP_DATE_BEFORE = 1;
+    const DTP_DATE_AFTER = 365;
+
+    function pad(n) { return String(n).padStart(2, "0"); }
+    function fmt(d) {
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    }
+
+    function openPicker(e) {
+      if (e) e.stopPropagation();
+      const inp = document.getElementById("ticket_start_at");
+      const p = document.getElementById("dtp");
+      dtpSel = parsePickerValue(inp.value) || new Date(Date.now() + 300000);
+      p.classList.remove("hidden");
+      renderPicker();
+    }
+
+    function closePicker() { document.getElementById("dtp").classList.add("hidden"); }
+
+    function parsePickerValue(v) {
+      if (!v) return null;
+      const d = new Date(v.replace(/-/g, "/"));
+      return isNaN(d) ? null : d;
+    }
+
+    function dateKey(d) {
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    }
+
+    function dateLabel(d) {
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+      const base = new Date(d); base.setHours(0, 0, 0, 0);
+      const diff = Math.round((base - today) / 86400000);
+      const week = ["日", "一", "二", "三", "四", "五", "六"][d.getDay()];
+      if (diff === 0) return `今天 ${pad(d.getMonth() + 1)}/${pad(d.getDate())} 周${week}`;
+      if (diff === 1) return `明天 ${pad(d.getMonth() + 1)}/${pad(d.getDate())} 周${week}`;
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} 周${week}`;
+    }
+
+    function dateOptions() {
+      const base = new Date(); base.setHours(0, 0, 0, 0); base.setDate(base.getDate() - DTP_DATE_BEFORE);
+      const out = [];
+      for (let i = 0; i <= DTP_DATE_BEFORE + DTP_DATE_AFTER; i++) {
+        const d = new Date(base); d.setDate(base.getDate() + i);
+        out.push({ value: dateKey(d), label: dateLabel(d) });
+      }
+      return out;
+    }
+
+    function numberOptions(n) {
+      return Array.from({ length: n }, (_, i) => ({ value: String(i), label: pad(i) }));
+    }
+
+    function renderPicker() {
+      if (!dtpSel || isNaN(dtpSel)) dtpSel = new Date(Date.now() + 300000);
+      renderWheel("dtp_date", dateOptions(), dateKey(dtpSel));
+      renderWheel("dtp_h", numberOptions(24), String(dtpSel.getHours()));
+      renderWheel("dtp_m", numberOptions(60), String(dtpSel.getMinutes()));
+      renderWheel("dtp_s", numberOptions(60), String(dtpSel.getSeconds()));
+      document.getElementById("dtp_preview").textContent = fmt(dtpSel);
+    }
+
+    function renderWheel(id, options, selected) {
+      const el = document.getElementById(id);
+      const same = el.dataset.options === JSON.stringify(options.map(o => o.value));
+      if (!same) {
+        el.innerHTML = options.map((o, i) =>
+          `<div class="dtp-item" data-value="${escapeHtml(o.value)}" data-idx="${i}" onclick="dtpPickWheel('${id}', '${escapeHtml(o.value)}')">${escapeHtml(o.label)}</div>`).join("");
+        el.dataset.options = JSON.stringify(options.map(o => o.value));
+        el.onscroll = () => scheduleWheelSnap(id);
+      }
+      el.querySelectorAll(".dtp-item").forEach(item => item.classList.toggle("sel", item.dataset.value === selected));
+      const item = [...el.querySelectorAll(".dtp-item")].find(x => x.dataset.value === selected) || el.querySelector(".dtp-item");
+      if (item) {
+        const targetTop = parseInt(item.dataset.idx, 10) * DTP_ITEM_H;
+        if (Math.abs(el.scrollTop - targetTop) > 1) el.scrollTop = targetTop;
+      }
+    }
+
+    function scheduleWheelSnap(id) {
+      clearTimeout(dtpScrollTimers[id]);
+      dtpScrollTimers[id] = setTimeout(() => {
+        const el = document.getElementById(id);
+        const items = [...el.querySelectorAll(".dtp-item")];
+        if (!items.length) return;
+        const idx = Math.max(0, Math.min(items.length - 1, Math.round(el.scrollTop / DTP_ITEM_H)));
+        dtpPickWheel(id, items[idx].dataset.value);
+      }, 90);
+    }
+
+    function dtpPickWheel(id, value) {
+      if (!dtpSel || isNaN(dtpSel)) dtpSel = new Date(Date.now() + 300000);
+      if (id === "dtp_date") {
+        const [y, m, d] = value.split("-").map(Number);
+        dtpSel.setFullYear(y, m - 1, d);
+      } else if (id === "dtp_h") {
+        dtpSel.setHours(parseInt(value, 10));
+      } else if (id === "dtp_m") {
+        dtpSel.setMinutes(parseInt(value, 10));
+      } else {
+        dtpSel.setSeconds(parseInt(value, 10));
+      }
+      renderPicker();
+    }
+
+    function dtpNow() { dtpSel = new Date(); renderPicker(); }
+    function dtpQuick(min) { dtpSel = new Date(Date.now() + min * 60000); dtpSel.setSeconds(0); renderPicker(); }
+    function dtpTodayAt(h) { const d = new Date(); d.setHours(h, 0, 0, 0); dtpSel = d; renderPicker(); }
+
+    function dtpConfirm() {
+      if (!dtpSel || isNaN(dtpSel)) dtpSel = new Date(Date.now() + 300000);
+      document.getElementById("ticket_start_at").value = fmt(dtpSel);
+      closePicker(); updateCountdownHint();
+    }
+
+    function clearStartAt() {
+      document.getElementById("ticket_start_at").value = "";
+      updateCountdownHint();
+    }
+
+    function updateCountdownHint() {
+      const hint = document.getElementById("countdown_hint");
+      const v = document.getElementById("ticket_start_at").value;
+      if (!v) { hint.textContent = ""; return; }
+      const diff = new Date(v.replace(/-/g, "/")).getTime() - Date.now();
+      if (diff <= 0) { hint.innerHTML = '<span style="color:#dc2626">该时间已过</span>'; return; }
+      const s = Math.floor(diff / 1000);
+      const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60), sec = s % 60;
+      hint.textContent = "· 还有 " + (d ? `${d}天` : "") + (h ? `${h}时` : "") + (m ? `${m}分` : "") + `${sec}秒`;
+    }
+    setInterval(updateCountdownHint, 1000);
+
+    // ==================== 抢票 ====================
+    function resetTicketButtons() {
+      const p = document.getElementById("btn_ticket_pause");
+      p.dataset.state = "running"; p.textContent = "暂停"; p.style.display = "none";
+      document.getElementById("btn_grab_now").style.display = "";
+      document.getElementById("btn_grab_scheduled").style.display = "";
+      document.getElementById("btn_ticket_stop").style.display = "none";
+    }
+
+    function grabTickets(scheduled) {
+      const payload = {
+        max_attempts: parseInt(document.getElementById("ticket_max_attempts").value) || 0,
+        retry_interval_min: parseFloat(document.getElementById("ticket_interval_min").value) || 2.0,
+        retry_interval_max: parseFloat(document.getElementById("ticket_interval_max").value) || 4.0,
+        stop_others_on_success: document.getElementById("ticket_stop_others").checked,
+        auto_confirm: document.getElementById("ticket_auto_confirm").checked,
+      };
+      if (scheduled) {
+        const at = document.getElementById("ticket_start_at").value;
+        if (!at) { appendLog("请先设置开抢时间", "error"); return; }
+        payload.start_at = at;   // 已经是 YYYY-MM-DD HH:MM:SS，后端直接能解析
+      }
+      fetch("/ticket/do_grab", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
+        .then(r => r.json()).then(d => {
+          if (d.task_id && d.code === 200) {
+            currentTicketTaskId = d.task_id; startLogPolling(d.task_id);
+            document.getElementById("btn_grab_now").style.display = "none";
+            document.getElementById("btn_grab_scheduled").style.display = "none";
+            document.getElementById("btn_ticket_pause").style.display = "";
+            document.getElementById("btn_ticket_stop").style.display = "";
+          }
+          appendLog(d.result, d.code === 200 ? "info" : "error");
+        }).catch(e => appendLog(`请求失败: ${e.message}`, "error"));
+    }
+
+    function toggleTicketPause() {
+      if (!currentTicketTaskId) return;
+      const btn = document.getElementById("btn_ticket_pause");
+      const action = btn.dataset.state === "paused" ? "resume" : "pause";
+      fetch("/ticket/control_task", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ task_id: currentTicketTaskId, action }) })
+        .then(r => r.json()).then(d => {
+          if (d.code === 200) {
+            btn.dataset.state = action === "pause" ? "paused" : "running";
+            btn.textContent = action === "pause" ? "恢复" : "暂停";
+          }
+          appendLog(d.result, d.code === 200 ? "warning" : "error");
+        });
+    }
+
+    function stopTicketTask() {
+      if (!currentTicketTaskId) return;
+      fetch("/ticket/control_task", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ task_id: currentTicketTaskId, action: "stop" }) })
+        .then(r => r.json()).then(d => {
+          resetTicketButtons(); currentTicketTaskId = null;
+          appendLog(d.result, d.code === 200 ? "warning" : "error");
+        });
+    }
+
+    // ==================== 初始化 ====================
+    window.addEventListener("beforeunload", () => stopLogPolling());
+    document.addEventListener("click", e => {
+      const p = document.getElementById("dtp");
+      if (!p.classList.contains("hidden") && !p.contains(e.target) && e.target.id !== "ticket_start_at") closePicker();
+    });
+    document.addEventListener("keydown", e => {
+      if (e.key !== "Escape") return;
+      if (!document.getElementById("account_modal").classList.contains("hidden")) closeAccountModal();
+      closePicker();
+    });
+
+    document.addEventListener("DOMContentLoaded", () => {
+      initGlobalLogStream();
+      loadBrowsers().then(loadAccounts).then(loadPlans).then(loadEvent)
+        .then(() => { if (accounts.length) refreshLoginStatus(); });
+    });
   </script>
 </body>
 

@@ -1,2 +1,2 @@
 from .eg import eg
-from .qq import qq
+from .ticket import ticket

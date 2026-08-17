@@ -1,0 +1,595 @@
+from flask import Blueprint, jsonify, request, Response, stream_with_context
+from playwright.async_api import async_playwright
+from ..Auto.ticket_operation import run as run_ticket
+from ..Auto.ticket_login import login_all, check_login_status
+from ..Auto.ticket_parser import parse_event
+from ..Auto import ticket_store as store
+from ..Auto.bit_api import getAllBrowsers, BitBrowserNotRunning, clearLoginStateBatch
+from ..utils.logger import LogCapture, log_manager, task_state_manager
+import uuid
+import threading
+import asyncio
+import json
+import queue
+import time
+from datetime import datetime
+
+ticket = Blueprint("ticket", __name__)
+
+
+@ticket.route("/do_grab", methods=["post"])
+def do_grab():
+    """
+    发起抢票：按第二步保存的配置，每个账号带各自的场次/票档/张数并发开抢。
+
+    请求体：
+    {
+        "account_ids": ["..."],       # 参与的抢票人，不传则全部有配置的账号
+        "start_at": "2026-08-20 13:00:00",  # 定时抢票；不传或留空 = 立即抢票
+        "max_attempts": 0,            # 最大尝试次数，0=不限制
+        # 重试间隔别调太小：站点按 IP 限流，实测密集请求几十次就会被掐连接，
+        # 被限之后该窗口连正常浏览都不行，反而彻底抢不了
+        "retry_interval_min": 2.0,
+        "retry_interval_max": 4.0,
+        "stop_others_on_success": false  # 多账号各抢各的，默认不因一人成功而停掉其他人
+    }
+    """
+    task_id = str(uuid.uuid4())
+    try:
+        body = request.json or {}
+
+        accounts = store.get_accounts()
+        only_ids = body.get("account_ids")
+        if only_ids:
+            accounts = [a for a in accounts if a["id"] in only_ids]
+        if not accounts:
+            return jsonify(code=400, result="没有可参与抢票的抢票人"), 400
+
+        plans = store.get_plans()
+        event = store.get_event()
+
+        if not event.get("sessions"):
+            return jsonify(code=400, result="还没有解析过活动，请先完成第一步"), 400
+
+        # 当前活动里合法的场次/票档文本，用来校验配置有没有跟活动对上。
+        # 这个校验很重要：解析过 A 活动、配好方案，之后又解析了 B 活动，
+        # event.json 会被 B 覆盖，但 plans 里还留着 A 的场次文本。
+        # 没有校验的话，抢票会导航到 B 的页面去找 A 的场次，
+        # 表现成"未找到匹配场次"，看着像选择器坏了，其实是配置串台了。
+        valid_sessions = {s["text"] for s in event["sessions"]}
+        valid_tiers = {t["text"] for s in event["sessions"] for t in s["tiers"]}
+
+        # 一个窗口只能有一个抢票人，否则并发抢票时多个任务会操作同一个浏览器
+        used_windows = {}
+        for a in accounts:
+            bid = a.get("browser_id")
+            if not bid:
+                continue
+            label = a.get("remark") or a.get("email")
+            if bid in used_windows:
+                return (
+                    jsonify(
+                        code=400,
+                        result=f"「{used_windows[bid]}」和「{label}」绑定了同一个浏览器窗口，"
+                               "并发抢票时会互相干扰。请先给他们分配各自独立的窗口。",
+                    ),
+                    400,
+                )
+            used_windows[bid] = label
+
+        # 把账号 + 配置组装成引擎要的任务列表，顺便校验配置是否完整
+        tasks = []
+        problems = []
+        for a in accounts:
+            label = a.get("remark") or a.get("email")
+            if not a.get("browser_id"):
+                problems.append(f"{label} 没绑定浏览器窗口")
+                continue
+            plan = plans.get(a["id"]) or {}
+            if not plan.get("session_text") or not plan.get("tier_text"):
+                problems.append(f"{label} 还没配置场次或票档")
+                continue
+            if plan["session_text"] not in valid_sessions:
+                problems.append(
+                    f"{label} 配的场次「{plan['session_text']}」不属于当前活动"
+                    f"（{event.get('name')}），请重新配置"
+                )
+                continue
+            if plan["tier_text"] not in valid_tiers:
+                problems.append(
+                    f"{label} 配的票档「{plan['tier_text']}」不属于当前活动，请重新配置"
+                )
+                continue
+            tasks.append(
+                {
+                    "browser_id": a["browser_id"],
+                    "label": label,
+                    "session_text": plan["session_text"],
+                    "tier_text": plan["tier_text"],
+                    "quantity": int(plan.get("quantity") or 1),
+                }
+            )
+
+        if not tasks:
+            return jsonify(code=400, result="；".join(problems) or "没有可执行的配置"), 400
+
+        # 定时抢票：把 "YYYY-MM-DD HH:MM:SS" 解析成时间戳
+        start_at = None
+        start_at_raw = (body.get("start_at") or "").strip()
+        if start_at_raw:
+            try:
+                dt = datetime.strptime(start_at_raw, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                try:
+                    # 兼容 datetime-local 控件的 "YYYY-MM-DDTHH:MM" 格式
+                    dt = datetime.strptime(start_at_raw, "%Y-%m-%dT%H:%M")
+                except ValueError:
+                    return (
+                        jsonify(code=400, result="开抢时间格式不对，应为 YYYY-MM-DD HH:MM:SS"),
+                        400,
+                    )
+            start_at = dt.timestamp()
+            if start_at <= time.time():
+                return jsonify(code=400, result="开抢时间已经过了，请重新设置"), 400
+
+        common = {
+            "event_url": event.get("event_url", ""),
+            "event_url_fragment": body.get("event_url_fragment", "hkticketing"),
+            "max_attempts": int(body.get("max_attempts", 0)),
+            "retry_interval_min": float(body.get("retry_interval_min", 2.0)),
+            "retry_interval_max": float(body.get("retry_interval_max", 4.0)),
+            # 抢到后是否自动勾选条款并点「确认订单」完成锁单（仍然不付款）
+            "auto_confirm": bool(body.get("auto_confirm", False)),
+        }
+        stop_others = bool(body.get("stop_others_on_success", False))
+
+        _run_in_background(
+            task_id,
+            lambda pw: run_ticket(
+                pw,
+                tasks,
+                task_id,
+                common,
+                stop_others_on_success=stop_others,
+                start_at=start_at,
+            ),
+            "抢票任务失败",
+        )
+
+        if problems:
+            log_manager.add_log(task_id, "已跳过：" + "；".join(problems), "warning")
+        mode = f"定时抢票（{start_at_raw}）" if start_at else "立即抢票"
+        log_manager.add_log(task_id, f"{mode}，共 {len(tasks)} 个账号参与...", "info")
+
+        return jsonify(
+            code=200,
+            result=f"{mode}任务已启动，共 {len(tasks)} 个账号",
+            task_id=task_id,
+        )
+    except Exception as e:
+        log_manager.add_log(task_id, f"启动抢票任务失败：{str(e)}", "error")
+        return (
+            jsonify(code=500, result="启动抢票任务失败：" + str(e), task_id=task_id),
+            500,
+        )
+
+
+def _run_in_background(task_id, coro_factory, fail_msg):
+    """
+    统一的后台任务启动器：建日志/状态任务 -> 起线程 -> 线程里跑 asyncio 事件循环。
+
+    coro_factory 接收一个 playwright 实例，返回要执行的协程。
+    """
+    log_manager.create_task(task_id)
+    task_state_manager.create_task(task_id)
+
+    def _thread():
+        try:
+            with LogCapture(task_id):
+
+                async def _run():
+                    async with async_playwright() as playwright:
+                        await coro_factory(playwright)
+
+                asyncio.run(_run())
+        except Exception as e:
+            log_manager.add_log(task_id, f"{fail_msg}：{str(e)}", "error")
+
+    threading.Thread(target=_thread, daemon=True).start()
+
+
+# ------------------------------------------------------------------
+# 抢票人管理（增删改查）
+# ------------------------------------------------------------------
+
+@ticket.route("/accounts", methods=["get"])
+def list_accounts():
+    """列出所有抢票人。密码脱敏，不下发到前端。"""
+    try:
+        return jsonify(code=200, accounts=store.get_accounts_safe())
+    except Exception as e:
+        return jsonify(code=500, result=str(e)), 500
+
+
+@ticket.route("/accounts/save", methods=["post"])
+def save_account():
+    """
+    新增或更新抢票人。带 id 为更新，不带为新增。
+    更新时密码留空或传 ****** 表示不改密码。
+    """
+    try:
+        saved = store.save_account(request.json or {})
+        return jsonify(code=200, result="已保存", id=saved["id"])
+    except ValueError as e:
+        return jsonify(code=400, result=str(e)), 400
+    except Exception as e:
+        return jsonify(code=500, result=str(e)), 500
+
+
+@ticket.route("/accounts/delete_batch", methods=["post"])
+def delete_accounts_batch():
+    """批量删除抢票人。一次写盘，不会出现删一半的中间状态。"""
+    try:
+        ids = (request.json or {}).get("ids") or []
+        if not ids:
+            return jsonify(code=400, result="没有选中任何抢票人"), 400
+        n = store.delete_accounts(ids)
+        return jsonify(code=200, result=f"已删除 {n} 个抢票人")
+    except Exception as e:
+        return jsonify(code=500, result=str(e)), 500
+
+
+@ticket.route("/accounts/delete", methods=["post"])
+def delete_account():
+    try:
+        acc_id = (request.json or {}).get("id")
+        if not acc_id:
+            return jsonify(code=400, result="缺少 id 参数"), 400
+        if store.delete_account(acc_id):
+            return jsonify(code=200, result="已删除")
+        return jsonify(code=404, result="找不到该抢票人"), 404
+    except Exception as e:
+        return jsonify(code=500, result=str(e)), 500
+
+
+@ticket.route("/accounts/clear_login", methods=["post"])
+def clear_login():
+    """
+    手动清除选中抢票人所绑定窗口的登录态（关窗 + 清 Cookie + 清本地存储）。
+
+    正常换人时 login_all 会按归属记录自动清，这里是人工兜底：
+    比如窗口被站点风控盯上想推倒重来、或者你就是想让某个人重新登一次。
+
+    同步执行，不走后台任务：每个窗口就是关窗+两个接口调用，几秒钟的事，
+    而且清完必须让前端立刻刷新登录状态，异步反而不好收尾。
+    """
+    try:
+        ids = (request.json or {}).get("ids") or []
+        if not ids:
+            return jsonify(code=400, result="没有选中任何抢票人"), 400
+
+        accounts = {a["id"]: a for a in store.get_accounts()}
+        done, skipped, bids = [], [], []
+        for acc_id in ids:
+            acc = accounts.get(acc_id)
+            if not acc:
+                continue
+            label = acc.get("remark") or acc.get("email")
+            bid = acc.get("browser_id")
+            if not bid:
+                skipped.append(label)
+                continue
+            bids.append(bid)
+            done.append(label)
+
+        # 批量清：关窗后要等进程退出才能清，这个等待跟窗口数量无关，
+        # 一个个清的话 10 个窗口要等 10 次
+        if bids:
+            clearLoginStateBatch(bids)
+            for bid in bids:
+                store.clear_window_owner(bid)
+
+        msg = f"已清除 {len(done)} 个窗口的登录态"
+        if done:
+            msg += f"（{'、'.join(done)}）"
+        if skipped:
+            msg += f"；{'、'.join(skipped)} 未绑定窗口，已跳过"
+        return jsonify(code=200, result=msg)
+    except BitBrowserNotRunning as e:
+        return jsonify(code=500, result=str(e)), 500
+    except Exception as e:
+        return jsonify(code=500, result=str(e)), 500
+
+
+# ------------------------------------------------------------------
+# 第一步：解析活动票务信息
+# ------------------------------------------------------------------
+
+@ticket.route("/event", methods=["get"])
+def get_event():
+    """取回上次解析留存的活动信息，页面刷新后不用重新解析。"""
+    try:
+        return jsonify(code=200, event=store.get_event())
+    except Exception as e:
+        return jsonify(code=500, result=str(e)), 500
+
+
+@ticket.route("/parse_event", methods=["post"])
+def do_parse_event():
+    """
+    解析活动的所有场次和票档并留存。
+
+    纯 HTTP 请求活动数据接口：不开浏览器窗口、不需要登录、不点「立即购买」。
+    通常几百毫秒返回，所以直接同步执行，不用后台线程那一套。
+    """
+    task_id = str(uuid.uuid4())
+    try:
+        event_url = (request.json or {}).get("event_url", "").strip()
+
+        log_manager.create_task(task_id)
+        with LogCapture(task_id):
+            event = parse_event(event_url)
+
+        store.save_event(event)
+        total = sum(len(s["tiers"]) for s in event.get("sessions", []))
+        avail = sum(
+            1 for s in event.get("sessions", []) for t in s["tiers"] if t["available"]
+        )
+        return jsonify(
+            code=200,
+            result=f"解析成功：{len(event.get('sessions', []))} 个场次 / {total} 个票档（{avail} 个可售）",
+            event=event,
+            task_id=task_id,
+        )
+    except ValueError as e:
+        return jsonify(code=400, result=str(e), task_id=task_id), 400
+    except Exception as e:
+        return jsonify(code=500, result=f"解析失败：{str(e)}", task_id=task_id), 500
+
+
+# ------------------------------------------------------------------
+# 第二步：抢票配置
+# ------------------------------------------------------------------
+
+@ticket.route("/plans", methods=["get"])
+def get_plans():
+    try:
+        return jsonify(code=200, plans=store.get_plans())
+    except Exception as e:
+        return jsonify(code=500, result=str(e)), 500
+
+
+@ticket.route("/plans/save", methods=["post"])
+def save_plans():
+    """整表覆盖保存每个账号的抢票配置。"""
+    try:
+        plans = store.save_plans((request.json or {}).get("plans") or {})
+        return jsonify(code=200, result=f"已保存 {len(plans)} 条配置")
+    except Exception as e:
+        return jsonify(code=500, result=str(e)), 500
+
+
+# ------------------------------------------------------------------
+# 一键登录
+# ------------------------------------------------------------------
+
+@ticket.route("/login_all", methods=["post"])
+def do_login_all():
+    """
+    一键登录：给每个账号打开各自的窗口，填账号密码并点登录。
+    验证码需要人工在弹出的窗口里点掉，本接口会等待（默认 180 秒）。
+    """
+    task_id = str(uuid.uuid4())
+    try:
+        body = request.json or {}
+        wait_seconds = int(body.get("wait_captcha_seconds", 180))
+        only_ids = body.get("account_ids")  # 不传则全部账号
+
+        accounts = store.get_accounts()
+        if only_ids:
+            accounts = [a for a in accounts if a["id"] in only_ids]
+        if not accounts:
+            return jsonify(code=400, result="没有可登录的抢票人"), 400
+
+        missing = [a["email"] for a in accounts if not a.get("browser_id")]
+        if missing:
+            return (
+                jsonify(
+                    code=400,
+                    result=f"这些账号还没绑定浏览器窗口：{'、'.join(missing)}",
+                ),
+                400,
+            )
+
+        _run_in_background(
+            task_id,
+            lambda pw: login_all(pw, accounts, wait_seconds, task_id),
+            "一键登录失败",
+        )
+        log_manager.add_log(task_id, f"开始一键登录，共 {len(accounts)} 个账号...", "info")
+        return jsonify(code=200, result="一键登录任务已启动", task_id=task_id)
+    except Exception as e:
+        return jsonify(code=500, result=str(e), task_id=task_id), 500
+
+
+@ticket.route("/login_status", methods=["get"])
+def login_status():
+    """
+    查所有抢票人的登录状态。
+
+    默认**不拉起**没打开的窗口（10 个人就是弹 10 个窗口，很吵），
+    那些标成 window_closed。传 ?open=1 强制全部拉起来查。
+    """
+    try:
+        accounts = store.get_accounts()
+        if not accounts:
+            return jsonify(code=200, statuses=[])
+
+        open_closed = request.args.get("open") == "1"
+        result = {}
+
+        def _thread():
+            try:
+                async def _run():
+                    async with async_playwright() as pw:
+                        result["data"] = await check_login_status(
+                            pw, accounts, open_closed_windows=open_closed
+                        )
+                asyncio.run(_run())
+            except Exception as e:
+                result["error"] = e
+
+        t = threading.Thread(target=_thread, daemon=True)
+        t.start()
+        t.join(timeout=120)
+
+        if t.is_alive():
+            return jsonify(code=500, result="查询登录状态超时"), 500
+        if "error" in result:
+            return jsonify(code=500, result=f"查询登录状态失败：{result['error']}"), 500
+        return jsonify(code=200, statuses=result["data"])
+    except BitBrowserNotRunning as e:
+        return jsonify(code=503, result=str(e)), 503
+    except Exception as e:
+        return jsonify(code=500, result=str(e)), 500
+
+
+@ticket.route("/browsers", methods=["get"])
+def browsers():
+    """
+    列出比特浏览器里所有的窗口（自动翻页，单页上限 100）。
+    前端用它来一键填充参与抢票的窗口ID，省去手动复制。
+    """
+    try:
+        rows = getAllBrowsers()
+        return jsonify(code=200, result=f"共 {len(rows)} 个窗口", browsers=rows)
+    except Exception as e:
+        # 最常见的是比特浏览器客户端未登录（token 失效），把原始 msg 透传给前端
+        return jsonify(code=500, result=f"获取窗口列表失败：{str(e)}"), 500
+
+
+@ticket.route("/control_task", methods=["post"])
+def control_task():
+    """控制抢票任务状态：暂停、恢复、停止"""
+    try:
+        task_id = request.json.get("task_id")
+        action = request.json.get("action")  # pause, resume, stop
+
+        if not task_id:
+            return jsonify(code=400, result="缺少task_id参数"), 400
+
+        if action == "pause":
+            if task_state_manager.pause_task(task_id):
+                log_manager.add_log(task_id, "任务已暂停", "warning")
+                return jsonify(code=200, result="任务已暂停")
+            return jsonify(code=400, result="无法暂停任务（任务可能不存在或未运行）"), 400
+        elif action == "resume":
+            if task_state_manager.resume_task(task_id):
+                log_manager.add_log(task_id, "任务已恢复", "info")
+                return jsonify(code=200, result="任务已恢复")
+            return jsonify(code=400, result="无法恢复任务（任务可能不存在或未暂停）"), 400
+        elif action == "stop":
+            if task_state_manager.stop_task(task_id):
+                log_manager.add_log(task_id, "任务已停止", "warning")
+                return jsonify(code=200, result="任务已停止")
+            return jsonify(code=400, result="无法停止任务（任务可能不存在）"), 400
+        else:
+            return (
+                jsonify(code=400, result="无效的action参数，支持：pause, resume, stop"),
+                400,
+            )
+    except Exception as e:
+        return jsonify(code=500, result=str(e)), 500
+
+
+@ticket.route("/get_logs", methods=["get"])
+def get_logs():
+    """获取指定任务的日志（轮询方式，SSE 不可用时的兜底）"""
+    task_id = request.args.get("task_id")
+    since_index = int(request.args.get("since_index", 0))
+
+    if not task_id:
+        return jsonify(code=400, result="缺少task_id参数"), 400
+
+    logs_data = log_manager.get_logs(task_id, since_index)
+    return jsonify(code=200, **logs_data)
+
+
+@ticket.route("/logs_stream", methods=["get"])
+def logs_stream():
+    """SSE流式推送日志
+    如果task_id为空，则推送所有任务的日志（全局模式）
+    """
+    task_id = request.args.get("task_id")  # 如果为空，则为全局模式
+
+    def generate():
+        """生成SSE事件流"""
+        # 注册SSE客户端（task_id为None时注册为全局客户端）
+        log_queue = log_manager.register_sse_client(task_id if task_id else None)
+
+        try:
+            # 发送初始连接成功消息
+            if task_id:
+                yield f"data: {json.dumps({'type': 'connected', 'message': f'SSE连接已建立（任务: {task_id}）'})}\n\n"
+            else:
+                yield f"data: {json.dumps({'type': 'connected', 'message': 'SSE连接已建立（全局模式）'})}\n\n"
+
+            # 如果指定了task_id，发送历史日志
+            if task_id:
+                history_logs = log_manager.get_logs(task_id, since_index=0)
+                if history_logs.get("logs"):
+                    recent_logs = history_logs["logs"][-50:]  # 只发送最近50条
+                    for log_entry in recent_logs:
+                        # 为历史日志添加task_id，以便前端过滤
+                        log_entry_with_task = {**log_entry, "task_id": task_id}
+                        yield f"data: {json.dumps({'type': 'log', 'data': log_entry_with_task})}\n\n"
+
+            # 持续监听新日志
+            import time as time_module
+
+            last_activity_time = time_module.time()
+            max_idle_time = 300  # 5分钟无日志后断开连接
+
+            while True:
+                try:
+                    # 使用超时机制，每30秒发送一次心跳
+                    log_entry = log_queue.get(timeout=30)
+
+                    if log_entry is None:
+                        # None是结束信号
+                        yield f"data: {json.dumps({'type': 'end', 'message': '日志流已结束'})}\n\n"
+                        break
+
+                    # 发送日志
+                    yield f"data: {json.dumps({'type': 'log', 'data': log_entry})}\n\n"
+                    last_activity_time = time_module.time()  # 更新活动时间
+
+                except queue.Empty:
+                    # 超时，发送心跳
+                    yield f"data: {json.dumps({'type': 'heartbeat', 'message': 'keepalive'})}\n\n"
+
+                    # 检查是否超过最大空闲时间
+                    if time_module.time() - last_activity_time > max_idle_time:
+                        # 长时间无日志，断开连接
+                        yield f"data: {json.dumps({'type': 'timeout', 'message': '连接超时，已断开'})}\n\n"
+                        break
+
+        except GeneratorExit:
+            # 客户端断开连接
+            pass
+        except Exception as e:
+            # 发生错误
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+        finally:
+            # 注销SSE客户端
+            log_manager.unregister_sse_client(task_id if task_id else None, log_queue)
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # 禁用Nginx缓冲
+            "Connection": "keep-alive",
+        },
+    )
