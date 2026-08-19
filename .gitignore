@@ -1,18 +1,38 @@
-venv/
-.venv/
+# Python
 __pycache__/
-.idea/
-__pycache__/
-instance/
-
-.pytest_cache/
-htmlcov/
-
-dist/
+*.py[cod]
+*.so
+.Python
 build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
 *.egg-info/
-
 .coverage
 *.pyc
+
+# 虚拟环境
+venv/
+.venv/
+env/
+
+# 运行时数据：抢票人账号密码、抢票配置、解析结果、窗口归属
+# **不要移除这一行**，accounts.json 里是明文密码
 data/
 
+# 日志
+log/*
+!log/.gitkeep
+*.log
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
