@@ -168,6 +168,7 @@
           <div class="flex gap-1.5">
             <button onclick="toggleSelectMode()" id="btn_select_mode" class="btn btn-sm">选择</button>
             <button onclick="loadBrowsers()" id="btn_load_browsers" class="btn btn-sm">窗口</button>
+            <button onclick="downloadTemplate()" class="btn btn-sm" title="下载标准格式模板，照着填即可">模板</button>
             <button onclick="document.getElementById('csv_file').click()" class="btn btn-sm">导入</button>
             <input type="file" id="csv_file" accept=".csv,.xlsx,.xlsm,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" class="hidden" onchange="onCsvPicked(this)" />
             <button onclick="openAccountModal()" class="btn btn-sm btn-primary">新增</button>
@@ -342,7 +343,7 @@
       </div>
       <div id="import_rows" class="scroll-y px-5 flex-1"></div>
       <div class="px-5 py-3 flex items-center gap-2 shrink-0" style="border-top:1px solid var(--line)">
-        <span class="text-xs" style="color:var(--ink-3)">表格里是明文密码，导入后建议删掉该文件</span>
+        <span class="text-xs" style="color:var(--ink-3)">窗口序号留空会自动分配 · 表格里是明文密码，导入后建议删掉</span>
         <div class="flex-1"></div>
         <button onclick="closeImportModal()" class="btn btn-sm">取消</button>
         <button onclick="commitImport()" id="btn_commit_import" class="btn btn-sm btn-primary">确认导入</button>
@@ -1206,7 +1207,8 @@
             <div class="min-w-0 flex-1">
               <span style="color:var(--ink)">${escapeHtml(r.remark || "(无备注)")}</span>
               <span style="color:var(--ink-3)"> · ${escapeHtml(r.email || "(空)")}</span>
-              ${r.seq ? `<span style="color:var(--ink-3)"> · 窗口 ${escapeHtml(r.seq)}</span>` : ""}
+              ${r.seq ? `<span style="color:var(--ink-3)"> · 窗口 ${escapeHtml(r.seq)}${r.auto_window ? "（自动分配）" : ""}</span>`
+                       : `<span style="color:var(--ink-3)"> · 无可用窗口</span>`}
               ${r.has_member_code ? `<span style="color:var(--ink-3)"> · 有会员码</span>` : ""}
               ${bad ? `<div style="color:#b91c1c">第 ${r.line} 行：${r.issues.map(escapeHtml).join("；")}</div>` : ""}
             </div>
@@ -1225,6 +1227,15 @@
         if (d.code === 200) { closeImportModal(); loadAccounts().then(loadPlans); }
       }).catch(e => toast(`导入失败: ${e.message}`, "error"))
         .finally(() => { btn.disabled = false; btn.textContent = "确认导入"; });
+    }
+
+    // 模板下载。给标准格式比在文档里描述列名有用得多——
+    // 列名、顺序、示例行都摆在那，照着填就行。
+    function downloadTemplate() {
+      const xlsx = confirm(
+        "下载导入模板\n\n确定 = Excel (.xlsx)\n取消 = CSV (.csv)"
+      );
+      window.location.href = "/ticket/accounts/template" + (xlsx ? "?fmt=xlsx" : "");
     }
 
     function closeImportModal() {

@@ -164,8 +164,13 @@ cd HKTicket && PORT=5055 ./venv/bin/python run.py
 李四,lisi@example.com,pwd456,4,
 ```
 
-**窗口用序号不是 ID** —— 序号就是比特浏览器界面上显示的那个数字，ID 是
-32 位十六进制，人没法手填。
+点「模板」按钮可以直接下载标准格式（Excel 或 CSV 二选一），照着填即可。
+
+**窗口序号可以留空** —— 留空时程序自动分配没被占用的窗口，按序号从小到大。
+窗口不够时剩下的人不分配窗口，导入照常成功，预览里会说明有几个人没分到
+（10 个人 5 个窗口分两批抢是很正常的用法，不该当成错误）。
+想指定谁用哪个窗口就手动填，序号就是比特浏览器界面上显示的那个数字
+（ID 是 32 位十六进制，人没法手填）。
 
 **编码不用管。** 文件是原样上传的，后端按 `utf-8-sig → utf-8 → gbk → big5`
 依次尝试。中文 Windows 的 Excel「另存为 CSV」默认存 GBK 而不是 UTF-8，
@@ -435,6 +440,7 @@ cookie 和 cache 两个都要清：cookie 里是会话，但站点在 localStora
 | POST | `/ticket/accounts/save` | 新增 / 更新抢票人 |
 | POST | `/ticket/accounts/delete` | 删除单个 |
 | POST | `/ticket/accounts/delete_batch` | 批量删除 |
+| GET | `/ticket/accounts/template` | 下载导入模板（`?fmt=xlsx` 给 Excel） |
 | POST | `/ticket/accounts/import` | CSV / Excel 导入（commit=false 只预览） |
 | POST | `/ticket/accounts/clear_login` | 批量清除登录态 |
 | GET | `/ticket/preflight` | 开抢前自检 |

@@ -292,6 +292,85 @@ def delete_account():
         return jsonify(code=500, result=str(e)), 500
 
 
+def _attachment(filename: str) -> dict:
+    """
+    生成 Content-Disposition 头，**文件名支持中文**。
+
+    HTTP 头只能是 latin-1，直接放中文会让 Werkzeug 在写响应头时抛
+    UnicodeEncodeError——而且那时候状态行已经发出去了，客户端看到的是连接挂住，
+    日志里才有真正的异常。所以必须按 RFC 5987 编码。
+
+    同时给一个纯 ASCII 的 filename 兜底，老浏览器不认 filename* 时用它。
+    """
+    from urllib.parse import quote
+
+    ascii_name = filename.encode("ascii", "ignore").decode("ascii") or "download"
+    return {
+        "Content-Disposition":
+            f"attachment; filename=\"{ascii_name}\"; "
+            f"filename*=UTF-8''{quote(filename)}"
+    }
+
+
+@ticket.route("/accounts/template", methods=["get"])
+def accounts_template():
+    """
+    下载导入模板。?fmt=xlsx 给 Excel，默认给 CSV。
+
+    有个标准模板比在文档里描述列名有用得多：列名、顺序、示例行都摆在那，
+    照着填就行，不会出现"我这列该叫什么"的来回确认。
+    """
+    import csv
+    import io
+
+    headers = ["备注", "账号", "密码", "窗口序号", "会员码"]
+    samples = [
+        ["张三", "zhang@example.com", "密码1", "3", ""],
+        ["李四", "lisi@example.com", "密码2", "4", "MC-8891"],
+        ["留空自动分配窗口", "wang@example.com", "密码3", "", ""],
+    ]
+    stamp = datetime.now().strftime("%Y%m%d")
+
+    if request.args.get("fmt") == "xlsx":
+        from openpyxl import Workbook
+        from openpyxl.styles import Font
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "抢票人"
+        ws.append(headers)
+        for c in ws[1]:
+            c.font = Font(bold=True)
+        for row in samples:
+            ws.append(row)
+        # 密码和会员码列设成文本格式，否则纯数字的密码/会员码会被 Excel
+        # 当成数值：前导 0 消失、长数字变成科学计数法
+        for col in ("C", "E"):
+            for cell in ws[col]:
+                cell.number_format = "@"
+        for col, w in zip("ABCDE", (22, 30, 16, 12, 18)):
+            ws.column_dimensions[col].width = w
+        buf = io.BytesIO()
+        wb.save(buf)
+        return Response(
+            buf.getvalue(),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers=_attachment(f"抢票人模板_{stamp}.xlsx"),
+        )
+
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(headers)
+    for row in samples:
+        w.writerow(row)
+    # utf-8-sig：不带 BOM 的话 Excel 双击打开中文列名全是乱码
+    return Response(
+        buf.getvalue().encode("utf-8-sig"),
+        content_type="text/csv; charset=utf-8",
+        headers=_attachment(f"抢票人模板_{stamp}.csv"),
+    )
+
+
 # 导入表格时认哪些列名。第一行必须是表头，顺序随意，多余的列忽略。
 # 一个字段给多个别名，是因为这份表往往是别人给的，列名五花八门，
 # 强行要求"必须叫账号"只会让人反复改表。
@@ -462,9 +541,21 @@ def import_accounts():
         by_email = {a["email"].lower(): a for a in existing}
         taken = {a.get("browser_id"): a for a in existing if a.get("browser_id")}
 
+        # 窗口序号留空时自动分配。手动填 10 个人的窗口号很烦，而且容易填重
+        # （填重就是致命的串号）。留空交给程序按序号从小到大分配没被占用的窗口。
+        # 窗口不够时**剩下的人不分配窗口**，导入照常成功，只是在预览里说清楚——
+        # 这是很正常的情况（10 个人 5 个窗口分两批抢），不该当成错误拦住。
+        free_seqs = sorted(
+            (sq for sq, bid in id_by_seq.items() if bid not in taken),
+            key=lambda x: int(x) if x.isdigit() else 1 << 30,
+        )
+        auto_pool = list(free_seqs)
+
         parsed = []
         seen_emails = set()
         seen_seqs = {}
+        auto_assigned = 0
+        no_window = 0
         ok_count = new_count = update_count = 0
 
         for i, row in enumerate(rows_raw, start=2):   # 第 1 行是表头
@@ -495,7 +586,22 @@ def import_accounts():
                 issues.append("密码为空（新增必须填）")
 
             browser_id = ""
-            if seq:
+            auto = False
+            if not seq and not conn_err:
+                # 这个人已经绑过窗口了（更新场景）就沿用，不重新分配
+                old_acc = by_email.get(email.lower())
+                if old_acc and old_acc.get("browser_id"):
+                    browser_id = old_acc["browser_id"]
+                    seq = next((sq for sq, b in id_by_seq.items() if b == browser_id), "")
+                elif auto_pool:
+                    seq = auto_pool.pop(0)
+                    browser_id = id_by_seq[seq]
+                    auto = True
+                    auto_assigned += 1
+                else:
+                    no_window += 1
+
+            if seq and not browser_id:
                 if conn_err:
                     issues.append("连不上比特浏览器，无法校验窗口序号")
                 elif seq not in id_by_seq:
@@ -518,8 +624,12 @@ def import_accounts():
                 else:
                     new_count += 1
 
+            if auto:
+                seen_seqs[seq] = email
+
             parsed.append({
                 "line": i, "email": email, "remark": remark, "seq": seq,
+                "auto_window": auto,
                 "has_password": bool(password),
                 "has_member_code": bool(member_code),
                 "action": "更新" if is_update else "新增",
@@ -538,6 +648,10 @@ def import_accounts():
         bad = len(parsed) - ok_count
         if bad:
             summary += f"；{bad} 行有问题会被跳过"
+        if auto_assigned:
+            summary += f"；{auto_assigned} 人自动分配了窗口"
+        if no_window:
+            summary += f"；{no_window} 人没有可用窗口（可稍后手动绑定或分批抢）"
         if source_note:
             summary += f"（来源：{source_note}）"
 
@@ -733,9 +847,7 @@ def export_results_csv():
             # 用 content_type 而不是 mimetype：mimetype 里带 charset 的话
             # Flask 会再追加一次，变成重复的 charset=utf-8; charset=utf-8
             content_type="text/csv; charset=utf-8",
-            headers={
-                "Content-Disposition": f'attachment; filename="hkticket_results_{stamp}.csv"'
-            },
+            headers=_attachment(f"抢票战果_{stamp}.csv"),
         )
     except Exception as e:
         return jsonify(code=500, result=str(e)), 500
