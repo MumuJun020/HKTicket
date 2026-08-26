@@ -114,6 +114,9 @@ def save_account(account):
                     existing["email"] = email
                     existing["remark"] = (account.get("remark") or "").strip()
                     existing["browser_id"] = (account.get("browser_id") or "").strip()
+                    # 会员优先购票码。选填——只有会员预售场用得上，
+                    # 普通场次留空即可。跟密码一样是明文存的。
+                    existing["member_code"] = (account.get("member_code") or "").strip()
                     _write(ACCOUNTS_FILE, accounts)
                     return existing
             raise ValueError(f"找不到 id 为 {acc_id} 的抢票人")
@@ -127,6 +130,7 @@ def save_account(account):
             "password": password,
             "remark": (account.get("remark") or "").strip(),
             "browser_id": (account.get("browser_id") or "").strip(),
+            "member_code": (account.get("member_code") or "").strip(),
         }
         accounts.append(new_account)
         _write(ACCOUNTS_FILE, accounts)

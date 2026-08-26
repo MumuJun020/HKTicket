@@ -175,6 +175,25 @@ def _extract_event(data: dict, event_url: str) -> dict:
     """
     sessions = []
     for ev in data.get("eventVoList") or []:
+        # 接口的票档列表和选票页显示的列表**不是一回事**，映射规则如下
+        # （2026-08-26 在 NCT 127 预售场实测，6/6 精确吻合）：
+        #
+        #   接口返回 12 个：6 个普通档（isPermission=False）
+        #                  + 6 个会员预售档（isPermission=True）
+        #   选票页只列出 6 个普通档，会员档一个都不显示。
+        #
+        #   父子关系跟直觉是反的：**会员档是父，普通档是子**——
+        #   会员档的 childPriceIds 指向对应的普通档 priceId。
+        #   所以选中普通档之后，数量区显示的是那个会员档的名字。
+        #
+        # 由此得到两条可以从接口直接算出来的结论，不需要打开页面：
+        #   1. 页面上能选到的票档 = isPermission != True 的那些
+        #   2. 某个普通档如果被会员档的 childPriceIds 引用，
+        #      选中它、点「下一步」时会弹出会员优先购票码输入框
+        gated_ids = set()
+        for pv in ev.get("priceVoList") or []:
+            if pv.get("isPermission") and pv.get("childPriceIds"):
+                gated_ids.update(str(x) for x in pv["childPriceIds"])
         # 场次是否在售。saleState==3 表示整场停售/售罄，此时票档说什么都不算数。
         sale_state = ev.get("saleState")
         session_on_sale = sale_state == 2 and not ev.get("sellOut", False)
@@ -199,20 +218,21 @@ def _extract_event(data: dict, event_url: str) -> dict:
                     # 场次在售 + 该票档没售罄 才算可买。
                     # 不要用 canAddCart，那是购物车功能标志，跟可买性无关（见上方说明）
                     "available": session_on_sale and not pv.get("sellOut", False),
-                    # 需要会员码/权益码才能购买的票档（2026-08-26 在 NCT 127 实测）。
-                    #
-                    # 这类票档接口里照样返回，但**在选票页上根本不显示**——
-                    # 它们要先输入会员码解锁（页面 URL 上的 privilegeCodePrifixState
-                    # 就是这个开关）。不标出来的话用户会在配置里选中一个
-                    # "看得见但永远抢不到"的票档，抢票时一直报「未找到票档」，
-                    # 看着像程序坏了，其实是配置选了个走不通的。
-                    "need_member_code": bool(pv.get("isPermission"))
-                                        or pv.get("accessCodeMultipleState") is not None,
+                    # 这一档在选票页的票档列表里显不显示（规则见上方说明）。
+                    # 不显示的不该出现在配置下拉里——选了也永远匹配不到。
+                    "on_page": not bool(pv.get("isPermission")),
+                    # 选中它点「下一步」会不会弹会员优先购票码输入框。
+                    # 有会员码就能过，没有就买不了这一场。
+                    "need_member_code": str(pv.get("priceId")) in gated_ids,
                     # 原始字段留着，出现判断分歧时方便核对
                     "raw_sell_out": bool(pv.get("sellOut", False)),
                     "raw_can_add_cart": bool(pv.get("canAddCart")),
                 }
             )
+
+        # 只保留页面上真的会出现的票档。会员预售档（isPermission=True）
+        # 接口里有、页面上没有，留着只会让人配出一个永远抢不到的方案。
+        tiers = [t for t in tiers if t["on_page"]]
 
         sessions.append(
             {
@@ -268,7 +288,7 @@ def parse_event(event_url: str) -> dict:
         for t in s["tiers"]:
             tag = "" if t["available"] else " ← 售罄"
             if t.get("need_member_code"):
-                tag += " ← 需会员码（选票页上不显示，普通流程抢不到）"
+                tag += " ← 需会员优先购票码"
             print(f"[解析]     · {t['text']}{tag}")
 
     return event

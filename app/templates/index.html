@@ -386,6 +386,9 @@
         <div><label class="lbl">密码</label><input type="text" id="m_password" class="inp font-mono" /></div>
         <div><label class="lbl">备注（选填）</label><input type="text" id="m_remark" class="inp" placeholder="列表里用来区分，比如「老王」" /></div>
         <div>
+          <label class="lbl">会员优先购票码（选填）</label>
+          <input type="text" id="m_member_code" class="inp mb-4" placeholder="只有会员预售场用得上，没有就留空" />
+
           <label class="lbl">浏览器窗口</label>
           <select id="m_browser" class="inp"></select>
           <p class="text-[11px] mt-1.5" style="color:var(--ink-3)">每人必须用独立窗口，共用会导致登录信息互相覆盖</p>
@@ -612,6 +615,7 @@
       document.getElementById("m_email").value = a ? a.email : "";
       document.getElementById("m_password").value = a ? a.password : "";
       document.getElementById("m_remark").value = a ? a.remark : "";
+      document.getElementById("m_member_code").value = a ? (a.member_code || "") : "";
       document.getElementById("modal_error").classList.add("hidden");
       const sel = document.getElementById("m_browser");
       sel.innerHTML = browsersCache.length
@@ -636,6 +640,7 @@
         email: document.getElementById("m_email").value.trim(),
         password: document.getElementById("m_password").value,
         remark: document.getElementById("m_remark").value.trim(),
+        member_code: document.getElementById("m_member_code").value.trim(),
         browser_id: document.getElementById("m_browser").value,
       };
       if (editingId) payload.id = editingId;

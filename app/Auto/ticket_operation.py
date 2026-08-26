@@ -304,10 +304,20 @@ async def grab_ticket_on_page(
             #      这不是"没抢到"，是"这条路走不通"——不识别的话会一直重试到天荒地老，
             #      日志上还只显示"本次尝试未成功"，完全看不出真正的原因。
             if await _needs_privilege_code(page):
-                print(f"[{browser_id}] 该场次是会员预售，点「下一步」后要求填写会员优先购票码")
-                print(f"[{browser_id}] 本工具不处理会员码，无法自动完成购买，已停止本窗口")
-                await _dismiss_privilege_dialog(page)
-                return False
+                member_code = (obj.get("member_code") or "").strip()
+                if not member_code:
+                    print(f"[{browser_id}] 该场次是会员预售，点「下一步」后要求填写会员优先购票码")
+                    print(f"[{browser_id}] 该抢票人没有填会员码，无法继续；"
+                          f"请在「抢票人」里补上会员码，或换一个不需要会员码的场次")
+                    await _dismiss_privilege_dialog(page)
+                    return False
+
+                if not await _submit_privilege_code(page, browser_id, member_code):
+                    # 码不对/已用完是**确定性失败**，重试多少次都一样，
+                    # 而且反复提交错误的码很可能被站点盯上，所以直接停掉这个窗口
+                    await _dismiss_privilege_dialog(page)
+                    return False
+                await asyncio.sleep(1)
 
             # 8) 判断是否成功进入确认订单页
             success = await _check_success(page)
@@ -734,6 +744,48 @@ async def _dismiss_privilege_dialog(page: Page) -> None:
         pass
 
 
+async def _submit_privilege_code(page: Page, label: str, code: str) -> bool:
+    """
+    把会员优先购票码填进弹窗并点「确定」。
+
+    :return: 是否通过。**通过与否只能靠"弹窗还在不在"判断**——
+        站点没有给出明确的成功/失败标识，码错了弹窗会留在原地（可能带错误提示），
+        码对了弹窗关闭、流程继续往确认订单页走。
+
+    码不对不做重试：那是确定性失败，重试多少次结果都一样，
+    而且反复提交错误的码很容易被站点风控盯上。
+    """
+    try:
+        inp = page.locator(PRIVILEGE_CODE_INPUT).first
+        await inp.fill(code)
+        await asyncio.sleep(0.2)
+
+        ok_btn = page.locator("button.mz-button", has_text="确定").first
+        if await ok_btn.count() == 0:
+            print(f"[{label}] 会员码弹窗里没找到「确定」按钮")
+            return False
+        await ok_btn.click()
+        await asyncio.sleep(1.5)
+
+        if await _needs_privilege_code(page):
+            # 弹窗还在 = 没过。把页面上的提示带出来，用户才知道是码错了还是用完了
+            msg = ""
+            try:
+                box = page.locator(".mz-modal-content").first
+                if await box.count() > 0:
+                    msg = _normalize_text(await box.inner_text())[:120]
+            except Exception:
+                pass
+            print(f"[{label}] 会员码未通过（可能填错或已用完）。弹窗提示：{msg or '（无）'}")
+            return False
+
+        print(f"[{label}] 会员码已通过")
+        return True
+    except Exception as e:
+        print(f"[{label}] 填写会员码时出错：{e}")
+        return False
+
+
 async def _record_result(page: Page, label: str, obj: dict, locked: bool) -> None:
     """
     把一次抢中落到战果记录里。
@@ -1097,6 +1149,7 @@ async def run(
                 "tier_text": t.get("tier_text", ""),
                 "quantity": int(t.get("quantity", 1)),
                 # 下面几项只用于战果记录，抢票流程本身不读
+                "member_code": t.get("member_code", ""),
                 "account_label": t.get("label", ""),
                 "email": t.get("email", ""),
                 "browser_id": t.get("browser_id", ""),

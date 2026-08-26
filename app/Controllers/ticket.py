@@ -112,11 +112,12 @@ def do_grab():
                     f"{label} 配的票档「{plan['tier_text']}」不属于当前活动，请重新配置"
                 )
                 continue
-            if plan["tier_text"] in member_tiers:
-                # 会员预售票档要输会员码才会出现在选票页上，自动流程走不通。
-                # 不拦的话会一直报「未找到票档」空转，看着像程序坏了。
+            if plan["tier_text"] in member_tiers and not (a.get("member_code") or "").strip():
+                # 这一档点「下一步」会弹会员优先购票码，没码过不去。
+                # 不拦的话会跑起来才发现，白白开一轮窗口。
                 problems.append(
-                    f"{label} 配的是会员预售票档，需要会员码，普通流程抢不到，请换一个票档"
+                    f"{label} 选的票档需要会员优先购票码，但他没有填。"
+                    f"请在「抢票人」里补上会员码，或换一个不需要会员码的场次"
                 )
                 continue
             tasks.append(
@@ -125,6 +126,7 @@ def do_grab():
                     "label": label,
                     # 战果记录要用：付款时得知道去哪个号、哪个窗口里操作
                     "email": a.get("email", ""),
+                    "member_code": a.get("member_code", ""),
                     "browser_seq": seq_by_id.get(a["browser_id"]),
                     "session_text": plan["session_text"],
                     "tier_text": plan["tier_text"],
@@ -940,10 +942,11 @@ def preflight():
                         if level != "error":
                             level = "warn"
                 if plan["tier_text"] in member_tiers:
-                    # 需会员码的票档在选票页上根本不显示，抢票时会一直报
-                    # 「未找到票档」，看着像程序坏了，其实是这条路走不通
-                    problems.append("配的是会员预售票档，需要会员码，普通流程抢不到")
-                    level = "error"
+                    if (a.get("member_code") or "").strip():
+                        problems.append("该票档需要会员优先购票码，已填，抢票时会自动提交")
+                    else:
+                        problems.append("该票档需要会员优先购票码，但这个抢票人没有填")
+                        level = "error"
 
             st = status_map.get(a["id"], {})
             if conn_err:
