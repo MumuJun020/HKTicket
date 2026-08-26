@@ -89,9 +89,12 @@ def do_grab():
         except Exception:
             pass
 
-        # 把账号 + 配置组装成引擎要的任务列表，顺便校验配置是否完整
+        # 把账号 + 配置组装成引擎要的任务列表，顺便校验配置是否完整。
+        # problems 是**导致该账号被跳过**的原因，notices 只是提醒（照常参与抢票）——
+        # 两者混在一起的话，日志会把"提醒"也写成"已跳过"，误导得很厉害。
         tasks = []
         problems = []
+        notices = []
         for a in accounts:
             label = a.get("remark") or a.get("email")
             if not a.get("browser_id"):
@@ -112,14 +115,14 @@ def do_grab():
                     f"{label} 配的票档「{plan['tier_text']}」不属于当前活动，请重新配置"
                 )
                 continue
+            # 需会员码的票档**照常参与抢票**，只是提醒一句。
+            # 不能在这里拦掉：会员预售场的全部票档都需要码，一拦就等于整场都抢不了。
+            # 有码就在弹窗出现时自动填，没码到那一步再停，那是运行时的事。
             if plan["tier_text"] in member_tiers and not (a.get("member_code") or "").strip():
-                # 这一档点「下一步」会弹会员优先购票码，没码过不去。
-                # 不拦的话会跑起来才发现，白白开一轮窗口。
-                problems.append(
-                    f"{label} 选的票档需要会员优先购票码，但他没有填。"
-                    f"请在「抢票人」里补上会员码，或换一个不需要会员码的场次"
+                notices.append(
+                    f"{label} 选的票档可能要求会员优先购票码，但他没有填；"
+                    f"届时若弹出输入框将无法继续"
                 )
-                continue
             tasks.append(
                 {
                     "browser_id": a["browser_id"],
@@ -186,6 +189,8 @@ def do_grab():
 
         if problems:
             log_manager.add_log(task_id, "已跳过：" + "；".join(problems), "warning")
+        if notices:
+            log_manager.add_log(task_id, "提醒：" + "；".join(notices), "warning")
         mode = f"定时抢票（{start_at_raw}）" if start_at else "立即抢票"
         log_manager.add_log(task_id, f"{mode}，共 {len(tasks)} 个账号参与...", "info")
 
@@ -943,10 +948,13 @@ def preflight():
                             level = "warn"
                 if plan["tier_text"] in member_tiers:
                     if (a.get("member_code") or "").strip():
-                        problems.append("该票档需要会员优先购票码，已填，抢票时会自动提交")
+                        problems.append("该票档需要会员优先购票码，已填，弹出时会自动提交")
                     else:
-                        problems.append("该票档需要会员优先购票码，但这个抢票人没有填")
-                        level = "error"
+                        # 只是提醒，不是 error：照样可以开抢，
+                        # 万一到时候没弹会员码窗（比如正票场次）就正常抢到了
+                        problems.append("该票档可能要求会员优先购票码，但这个抢票人没有填")
+                        if level != "error":
+                            level = "warn"
 
             st = status_map.get(a["id"], {})
             if conn_err:

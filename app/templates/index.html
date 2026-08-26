@@ -849,7 +849,7 @@
             ${escapeHtml(s.text)}${s.sell_out ? ' <span class="text-[11px]">· 整场售罄</span>' : ""}
           </div>
           <div class="flex flex-wrap gap-1.5 mt-1.5">
-            ${s.tiers.map(t => `<span class="tag ${t.need_member_code ? "" : (t.available ? "" : "tag-out")}"${t.need_member_code ? ' style="border-style:dashed;color:var(--ink-3)" title="需会员码，选票页上不显示，无法自动抢"' : ""}>${escapeHtml(t.text)}${t.need_member_code ? " 🔒" : ""}</span>`).join("")}
+            ${s.tiers.map(t => `<span class="tag ${t.available ? "" : "tag-out"}"${t.need_member_code ? ' title="点「下一步」时会要求填会员优先购票码，程序会自动填入该抢票人的码"' : ""}>${escapeHtml(t.text)}${t.need_member_code ? " 🔑" : ""}</span>`).join("")}
           </div>
         </div>`).join("");
     }
@@ -921,10 +921,11 @@
             qty.title = "";
           }
           ts.innerHTML = '<option value="">— 票档 —</option>' + (s ? s.tiers : []).map(t =>
-            // 需会员码的票档禁选：它在选票页上根本不显示，选了只会一直报
-            // 「未找到票档」，看着像程序坏了。售罄的仍然可选——那是蹲回流票的正常用法，
-            // 两者性质完全不同：一个是暂时没票，一个是这条路走不通。
-            `<option value="${escapeHtml(t.text)}"${t.text === plan.tier_text ? " selected" : ""}${t.need_member_code ? " disabled" : ""}>${escapeHtml(t.text)}${t.need_member_code ? " · 需会员码，无法自动抢" : (t.available ? "" : " · 售罄")}</option>`).join("");
+            // 需会员码的票档**照常可选**，只做标注。
+            // 有码就自动填、没码也让他试——能不能过是运行时的事，
+            // 不该在配置阶段就把人拦死（会员预售场的全部票档都需要码，
+            // 一禁选就等于整场都配不了）。售罄的同样可选，那是蹲回流票的用法。
+            `<option value="${escapeHtml(t.text)}"${t.text === plan.tier_text ? " selected" : ""}>${escapeHtml(t.text)}${t.need_member_code ? " · 需会员码" : ""}${t.available ? "" : " · 售罄"}</option>`).join("");
           markSoldOut(tr);
         };
         fill();
