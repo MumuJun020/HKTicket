@@ -854,15 +854,33 @@ async def _wait_until_start(start_at: float, task_id: Optional[str]) -> bool:
 
     倒计时用 [COUNTDOWN] 前缀打日志，前端会把这类日志原地刷新成一行，
     不会把日志区刷爆。返回 False 表示等待期间任务被停掉了。
+
+    暂停也必须在这里生效。早先只检查 stopped，于是暂停一个定时任务之后
+    倒计时照走、到点照样开抢——界面上明明显示「已暂停」，窗口却全被拉起来了
+    （虽然进抢票循环后会立刻停住，但窗口已经开了，行为和用户的预期完全相反）。
     """
+    paused_notified = False
     while True:
+        state = task_state_manager.get_state(task_id) if task_id else None
+        if state == "stopped":
+            print("任务已停止，取消定时抢票")
+            return False
+        if state == "paused":
+            # 暂停期间不推进倒计时，也不放行。恢复后如果开抢时刻已经过了，
+            # 下一轮 remaining <= 0 会立刻放行，不会因为暂停过就永远抢不了。
+            if not paused_notified:
+                print("定时抢票已暂停，倒计时停住；点「恢复」继续")
+                paused_notified = True
+            await asyncio.sleep(0.5)
+            continue
+        if paused_notified:
+            print("定时抢票已恢复")
+            paused_notified = False
+
         remaining = start_at - time.time()
         if remaining <= 0:
             print("到点，开始抢票！")
             return True
-        if task_id and task_state_manager.get_state(task_id) == "stopped":
-            print("任务已停止，取消定时抢票")
-            return False
 
         mins, secs = divmod(int(remaining), 60)
         hours, mins = divmod(mins, 60)

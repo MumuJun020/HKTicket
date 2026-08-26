@@ -171,16 +171,61 @@ log_manager = LogManager()
 
 
 class TaskStateManager:
-    """任务状态管理器：管理任务的运行、暂停、停止状态"""
-    
+    """
+    任务状态管理器：管理任务的运行、暂停、停止状态。
+
+    状态取值：running / paused / stopped / finished
+
+    **finished 是必须的。** 早先没有这个状态，任务跑完之后状态永远停在 running，
+    于是没有任何办法区分"还在抢"和"已经抢完了"。这个区分在页面刷新后恢复任务时
+    是必需的：不区分的话，刷新后会给一个早就结束的任务恢复出「暂停/停止」按钮。
+    """
+
     def __init__(self):
         self._states: Dict[str, str] = {}  # task_id -> state
+        self._kinds: Dict[str, str] = {}   # task_id -> 任务类型（grab / login）
         self._lock = Lock()
-    
-    def create_task(self, task_id: str):
-        """创建任务并设置为运行状态"""
+
+    def create_task(self, task_id: str, kind: str = ""):
+        """
+        创建任务并设置为运行状态。
+
+        :param kind: 任务类型。刷新页面后要恢复的只有抢票任务（它有暂停/停止按钮
+            和长时间运行的特点），登录任务不需要恢复，所以这里记一下好区分。
+        """
         with self._lock:
             self._states[task_id] = "running"
+            if kind:
+                self._kinds[task_id] = kind
+
+    def finish_task(self, task_id: str):
+        """
+        标记任务已结束。由后台线程在收尾时调用（无论正常结束还是异常）。
+
+        已经是 stopped 的不覆盖——用户主动停止和自然跑完是两回事，
+        日志上区分得开更好排查。
+        """
+        with self._lock:
+            if self._states.get(task_id) != "stopped":
+                self._states[task_id] = "finished"
+
+    def get_kind(self, task_id: str) -> str:
+        with self._lock:
+            return self._kinds.get(task_id, "")
+
+    def list_active(self, kind: str = "") -> list:
+        """
+        返回所有还在进行中（running / paused）的任务 ID。
+
+        用于页面刷新后恢复：以**服务端状态为准**去问"现在有没有任务在跑"，
+        而不是靠浏览器自己记。这样换个浏览器、换台机器打开控制台，
+        照样能接管正在跑的任务。
+        """
+        with self._lock:
+            return [
+                tid for tid, st in self._states.items()
+                if st in ("running", "paused") and (not kind or self._kinds.get(tid) == kind)
+            ]
     
     def pause_task(self, task_id: str) -> bool:
         """暂停任务，返回是否成功"""
@@ -216,6 +261,7 @@ class TaskStateManager:
         with self._lock:
             if task_id in self._states:
                 del self._states[task_id]
+            self._kinds.pop(task_id, None)
     
     def wait_for_resume(self, task_id: str) -> bool:
         """等待任务恢复（在暂停状态下）。如果任务被停止，返回False"""

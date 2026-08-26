@@ -170,6 +170,7 @@ def do_grab():
                 start_at=start_at,
             ),
             "抢票任务失败",
+            kind="grab",
         )
 
         if problems:
@@ -190,14 +191,16 @@ def do_grab():
         )
 
 
-def _run_in_background(task_id, coro_factory, fail_msg):
+def _run_in_background(task_id, coro_factory, fail_msg, kind=""):
     """
     统一的后台任务启动器：建日志/状态任务 -> 起线程 -> 线程里跑 asyncio 事件循环。
 
     coro_factory 接收一个 playwright 实例，返回要执行的协程。
+
+    :param kind: 任务类型（grab / login）。刷新页面后要恢复的只有抢票任务。
     """
     log_manager.create_task(task_id)
-    task_state_manager.create_task(task_id)
+    task_state_manager.create_task(task_id, kind)
 
     def _thread():
         try:
@@ -210,6 +213,11 @@ def _run_in_background(task_id, coro_factory, fail_msg):
                 asyncio.run(_run())
         except Exception as e:
             log_manager.add_log(task_id, f"{fail_msg}：{str(e)}", "error")
+        finally:
+            # 必须在 finally 里标结束：异常退出时也要标，否则那个任务会永远
+            # 显示成"进行中"，刷新页面后还会被恢复出来，用户点停止也停不掉
+            # （线程早没了），只能重启程序。
+            task_state_manager.finish_task(task_id)
 
     threading.Thread(target=_thread, daemon=True).start()
 
@@ -542,6 +550,7 @@ def do_login_all():
             task_id,
             lambda pw: login_all(pw, accounts, wait_seconds, task_id),
             "一键登录失败",
+            kind="login",
         )
         log_manager.add_log(task_id, f"开始一键登录，共 {len(accounts)} 个账号...", "info")
         return jsonify(code=200, result="一键登录任务已启动", task_id=task_id)
@@ -603,6 +612,36 @@ def browsers():
     except Exception as e:
         # 最常见的是比特浏览器客户端未登录（token 失效），把原始 msg 透传给前端
         return jsonify(code=500, result=f"获取窗口列表失败：{str(e)}"), 500
+
+
+@ticket.route("/active_task", methods=["get"])
+def active_task():
+    """
+    返回当前还在进行中的抢票任务，供页面刷新后接管。
+
+    解决的问题：抢票任务跑在后台线程里，而页面上的 task_id 只是个 JS 变量。
+    刷新页面（或电脑睡眠后标签页重载）之后，变量没了但任务还在跑——
+    界面回到初始状态，暂停和停止按钮都没了，任务却还在以 2~4 秒轮询，
+    用户既看不到进度也停不掉它，只能去杀进程。蹲通宵回流票时这是致命的。
+
+    **以服务端状态为准，不依赖浏览器记住什么。** 这样换个浏览器、
+    换台机器打开控制台，照样能接管正在跑的任务。
+
+    同时只会有一个抢票任务（界面上只能启动一个），所以取第一个就够；
+    真有多个也一并返回，避免悄悄漏掉。
+    """
+    try:
+        ids = task_state_manager.list_active(kind="grab")
+        if not ids:
+            return jsonify(code=200, task_id=None, tasks=[])
+        tasks = [
+            {"task_id": tid, "state": task_state_manager.get_state(tid)}
+            for tid in ids
+        ]
+        return jsonify(code=200, task_id=tasks[0]["task_id"],
+                       state=tasks[0]["state"], tasks=tasks)
+    except Exception as e:
+        return jsonify(code=500, result=str(e)), 500
 
 
 @ticket.route("/control_task", methods=["post"])

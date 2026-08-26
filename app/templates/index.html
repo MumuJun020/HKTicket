@@ -1018,6 +1018,18 @@
     setInterval(updateCountdownHint, 1000);
 
     // ==================== 抢票 ====================
+    // 切到「抢票进行中」的按钮状态。开抢时和刷新页面恢复时都要用同一套，
+    // 各写一份迟早会不一致。
+    function setTicketRunningButtons(paused) {
+      document.getElementById("btn_grab_now").style.display = "none";
+      document.getElementById("btn_grab_scheduled").style.display = "none";
+      const p = document.getElementById("btn_ticket_pause");
+      p.style.display = "";
+      p.dataset.state = paused ? "paused" : "running";
+      p.textContent = paused ? "恢复" : "暂停";
+      document.getElementById("btn_ticket_stop").style.display = "";
+    }
+
     function resetTicketButtons() {
       const p = document.getElementById("btn_ticket_pause");
       p.dataset.state = "running"; p.textContent = "暂停"; p.style.display = "none";
@@ -1043,10 +1055,7 @@
         .then(r => r.json()).then(d => {
           if (d.task_id && d.code === 200) {
             currentTicketTaskId = d.task_id; startLogPolling(d.task_id);
-            document.getElementById("btn_grab_now").style.display = "none";
-            document.getElementById("btn_grab_scheduled").style.display = "none";
-            document.getElementById("btn_ticket_pause").style.display = "";
-            document.getElementById("btn_ticket_stop").style.display = "";
+            setTicketRunningButtons(false);
           }
           appendLog(d.result, d.code === 200 ? "info" : "error");
         }).catch(e => appendLog(`请求失败: ${e.message}`, "error"));
@@ -1224,9 +1233,35 @@
       document.getElementById("results_card").scrollIntoView({ behavior: "smooth", block: "center" });
     }
 
+
+    // 刷新页面后接管仍在跑的抢票任务。
+    //
+    // 抢票跑在后台线程里，而页面上的 task_id 只是个 JS 变量。刷新页面
+    // （或电脑睡眠后标签页重载）之后变量没了，任务却还在跑——界面回到初始状态，
+    // 暂停和停止按钮都没了，任务还在以 2~4 秒轮询，用户既看不到进度也停不掉它，
+    // 只能去杀进程。蹲通宵回流票时这是致命的。
+    //
+    // 恢复依据是**服务端状态**而不是 localStorage：换个浏览器、换台机器打开
+    // 控制台照样能接管，而且不会出现「浏览器记着一个早就结束的任务」这种脏状态。
+    function recoverRunningTask() {
+      return fetch("/ticket/active_task").then(r => r.json()).then(d => {
+        if (d.code !== 200 || !d.task_id) return;
+        currentTicketTaskId = d.task_id;
+        setTicketRunningButtons(d.state === "paused");
+        startLogPolling(d.task_id);
+        appendLog(
+          d.state === "paused"
+            ? "检测到一个已暂停的抢票任务，已接管（可继续恢复或停止）"
+            : "检测到正在进行的抢票任务，已接管（日志与暂停/停止按钮已恢复）",
+          "warning"
+        );
+      }).catch(() => {});
+    }
+
     document.addEventListener("DOMContentLoaded", () => {
       initGlobalLogStream();
       loadResults();
+      recoverRunningTask();
       loadBrowsers().then(loadAccounts).then(loadPlans).then(loadEvent)
         .then(() => { if (accounts.length) refreshLoginStatus(); });
     });
