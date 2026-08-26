@@ -898,9 +898,23 @@
         // 抢回流票就是要预先配好一个当前售罄的票档，然后让程序一直轮询，
         // 等别人退票放出来的那一刻抢进去。禁选的话这个场景根本没法配。
         ss.innerHTML = '<option value="">— 场次 —</option>' + eventData.sessions.map(s =>
-          `<option value="${escapeHtml(s.text)}"${s.text === plan.session_text ? " selected" : ""}>${escapeHtml(s.text)}${s.sell_out ? " · 售罄" : ""}</option>`).join("");
+          `<option value="${escapeHtml(s.text)}"${s.text === plan.session_text ? " selected" : ""}>${escapeHtml(s.text)}${s.sell_out ? " · 售罄" : ""}${s.order_limit ? ` · 限购${s.order_limit}张` : ""}</option>`).join("");
         const fill = () => {
           const s = eventData.sessions.find(x => x.text === ss.value);
+          // 按场次的限购上限约束数量框。接口给的是 eventOrderLimit，
+          // 实测跟页面上加号置灰的位置一致（NCT 127：接口 2，页面点到 2 就灰）。
+          // 配超了不会导致抢不到——程序撞到上限会停下并按实际数量买——
+          // 但配的时候就说清楚，比抢完了才发现只买到 2 张好。
+          const qty = tr.querySelector(".plan-qty");
+          const lim = s && s.order_limit;
+          if (lim) {
+            qty.max = lim;
+            qty.title = `本场次限购 ${lim} 张`;
+            if (parseInt(qty.value) > lim) qty.value = lim;
+          } else {
+            qty.removeAttribute("max");
+            qty.title = "";
+          }
           ts.innerHTML = '<option value="">— 票档 —</option>' + (s ? s.tiers : []).map(t =>
             // 需会员码的票档禁选：它在选票页上根本不显示，选了只会一直报
             // 「未找到票档」，看着像程序坏了。售罄的仍然可选——那是蹲回流票的正常用法，

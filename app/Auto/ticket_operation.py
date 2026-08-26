@@ -275,8 +275,18 @@ async def grab_ticket_on_page(
             # 6) 设置购买数量。结构：.buyNum___a5xrK > span[减号, 当前数量, 加号]，
             #    到达边界的一侧会带 descGray___sLahL（置灰）。这里每点一次都确认数字真的变了，
             #    以免撞上限购上限后空点一堆。
-            if quantity > 1:
-                await _set_quantity(page, browser_id, quantity)
+            #
+            #    **无论买几张都要调用。** 曾经写成 `if quantity > 1` 才调，
+            #    理由是"买 1 张就是默认值"——那个假设是错的：2026-08-26 在 NCT 127
+            #    实测，这个活动的数量默认是 **0** 不是 1，合计显示 HK$ 0.00。
+            #    跳过设置的话就带着 0 张去点「下一步」，永远走不到确认订单页，
+            #    而且外面看起来像"抢不到"，完全查不出原因。
+            got = await _set_quantity(page, browser_id, quantity)
+            if got < 1:
+                print(f"[{browser_id}] 数量没能调上去（当前 {got}），本轮放弃")
+                raise RuntimeError("数量为 0")
+            if got < quantity:
+                print(f"[{browser_id}] 受限购限制，实际只能买 {got} 张（目标 {quantity}）")
 
             # 7) 提交订单（选座类活动上面写"下一步"，非选座类写"立即购买"，选择器通用）
             submit_btn = page.locator(
@@ -288,6 +298,16 @@ async def grab_ticket_on_page(
 
             await submit_btn.click()
             await asyncio.sleep(1)
+
+            # 7.5) 会员码关卡。点完「下一步」如果弹出会员优先购票码输入框，
+            #      说明这场是会员预售，没有码根本过不去（2026-08-26 在 NCT 127 实测）。
+            #      这不是"没抢到"，是"这条路走不通"——不识别的话会一直重试到天荒地老，
+            #      日志上还只显示"本次尝试未成功"，完全看不出真正的原因。
+            if await _needs_privilege_code(page):
+                print(f"[{browser_id}] 该场次是会员预售，点「下一步」后要求填写会员优先购票码")
+                print(f"[{browser_id}] 本工具不处理会员码，无法自动完成购买，已停止本窗口")
+                await _dismiss_privilege_dialog(page)
+                return False
 
             # 8) 判断是否成功进入确认订单页
             success = await _check_success(page)
@@ -679,6 +699,39 @@ async def _set_quantity(page: Page, browser_id: str, quantity: int) -> int:
         current = new_num
 
     return current
+
+
+# 会员优先购票码弹窗（2026-08-26 在 NCT 127 预售场实测）。
+#
+# 触发时机：选好场次票档、把数量调上去、点「下一步」之后弹出，
+# **在此之前不会出现**，所以只能在提交动作之后判断。
+# 弹窗里写明「每个会员优先购票码最多可购买每场 2 张门票」，取消则退回选票页，
+# 不会产生任何订单。
+PRIVILEGE_CODE_INPUT = ".privilegeCodeInput___YECG4 input"
+
+
+async def _needs_privilege_code(page: Page) -> bool:
+    """点完提交后是否弹出了会员优先购票码输入框。"""
+    try:
+        return await page.locator(PRIVILEGE_CODE_INPUT).count() > 0
+    except Exception:
+        return False
+
+
+async def _dismiss_privilege_dialog(page: Page) -> None:
+    """
+    关掉会员码弹窗，把页面退回选票页。
+
+    不关的话弹窗会一直挂在那儿，下一轮（或者人接手操作时）所有点击都被遮罩吃掉，
+    看起来就像窗口卡死了。
+    """
+    try:
+        cancel = page.locator("button.mz-button", has_text="取消").first
+        if await cancel.count() > 0:
+            await cancel.click()
+            await asyncio.sleep(0.3)
+    except Exception:
+        pass
 
 
 async def _record_result(page: Page, label: str, obj: dict, locked: bool) -> None:

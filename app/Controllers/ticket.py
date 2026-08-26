@@ -926,7 +926,20 @@ def preflight():
                 if plan["tier_text"] not in valid_tiers:
                     problems.append("配的票档不属于当前活动")
                     level = "error"
-                elif plan["tier_text"] in member_tiers:
+                else:
+                    sess = next((x for x in event.get("sessions", [])
+                                 if x["text"] == plan["session_text"]), None)
+                    lim = sess and sess.get("order_limit")
+                    if lim and int(plan.get("quantity") or 1) > lim:
+                        # 不算错误：撞上限时程序会停下并按实际能买的数量买，
+                        # 抢得到，只是买不到那么多张。提前说清楚而已。
+                        problems.append(
+                            f"配了 {plan.get('quantity')} 张，但本场次限购 {lim} 张，"
+                            f"实际只会买到 {lim} 张"
+                        )
+                        if level != "error":
+                            level = "warn"
+                if plan["tier_text"] in member_tiers:
                     # 需会员码的票档在选票页上根本不显示，抢票时会一直报
                     # 「未找到票档」，看着像程序坏了，其实是这条路走不通
                     problems.append("配的是会员预售票档，需要会员码，普通流程抢不到")
