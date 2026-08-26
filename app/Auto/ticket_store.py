@@ -1,10 +1,12 @@
 """
 抢票配置的本地持久化（JSON 文件）。
 
-存三份数据，都在项目根的 data/ 目录下（已加入 .gitignore，不进版本库）：
-    accounts.json  抢票人列表：账号、密码、备注、绑定的比特浏览器窗口
-    event.json     第一步解析留存的活动票务信息（场次、票档）
-    plans.json     第二步配置：每个账号各自要抢哪个场次、哪个票档、几张
+存这几份数据，都在项目根的 data/ 目录下（已加入 .gitignore，不进版本库）：
+    accounts.json       抢票人列表：账号、密码、备注、绑定的比特浏览器窗口
+    event.json          第一步解析留存的活动票务信息（场次、票档）
+    plans.json          第二步配置：每个账号各自要抢哪个场次、哪个票档、几张
+    window_owner.json   窗口归属：某个窗口上次登录的是谁
+    results.json        抢票战果：锁到的订单，**唯一不随启动清空的数据**
 
 安全提醒：accounts.json 里的密码是**明文**存储的。这是本地单机工具的取舍
 （登录时要把原文填进页面表单，做不了单向哈希）。因此：
@@ -25,6 +27,7 @@ ACCOUNTS_FILE = os.path.join(DATA_DIR, "accounts.json")
 EVENT_FILE = os.path.join(DATA_DIR, "event.json")
 PLANS_FILE = os.path.join(DATA_DIR, "plans.json")
 OWNERS_FILE = os.path.join(DATA_DIR, "window_owner.json")
+RESULTS_FILE = os.path.join(DATA_DIR, "results.json")
 
 # 读改写不是原子的，多个请求同时改会互相覆盖，这里用一把大锁串行化。
 # 单机小工具的量级，够用。
@@ -277,6 +280,114 @@ def clear_window_owner(browser_id: str):
 
 
 # ------------------------------------------------------------------
+# 抢票战果
+# ------------------------------------------------------------------
+#
+# 这是整个流程真正的产出，也是唯一**不随启动清空**的数据。
+#
+# 为什么必须落盘：程序只锁单不付款，每个锁到的订单都在等人去付，而且有支付时限。
+# 十个号并发抢完，谁抢到了、哪场、哪个档、订单号多少、还剩多久要付——
+# 这些信息如果只存在于滚动过去的日志里，等于没有。漏付一单，前面全白做。
+#
+# 按「批次」分组：今天抢 A 活动、明天抢 B 活动，记录不该混在一起。
+# 每次发起抢票生成一个批次，战果按批次归档，导出可以只导某一批。
+
+def _read_results() -> dict:
+    data = _read(RESULTS_FILE, {})
+    data.setdefault("batches", {})
+    data.setdefault("items", [])
+    return data
+
+
+def start_batch(event: dict) -> str:
+    """开抢时创建一个批次，返回 batch_id。"""
+    from datetime import datetime
+
+    batch_id = str(uuid.uuid4())
+    with _lock:
+        data = _read_results()
+        data["batches"][batch_id] = {
+            "batch_id": batch_id,
+            "event_name": (event or {}).get("name") or "未知活动",
+            "event_url": (event or {}).get("event_url") or "",
+            "started_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        _write(RESULTS_FILE, data)
+    return batch_id
+
+
+def add_result(batch_id: str, item: dict) -> dict:
+    """
+    记一条锁单成功。
+
+    **订单号取不到也要记。** 抓取订单号依赖页面结构，站点改版就可能失效；
+    但"这个人抢到了"这件事本身比订单号更重要，不能因为抓不到号就整条丢掉——
+    那样用户会以为没抢到，直接错过付款。取不到时 order_id 为 None，
+    界面上提示去对应窗口里自己看。
+    """
+    from datetime import datetime
+
+    record = {
+        "id": str(uuid.uuid4()),
+        "batch_id": batch_id,
+        "account_label": item.get("account_label") or "",
+        "email": item.get("email") or "",
+        "browser_id": item.get("browser_id") or "",
+        "browser_seq": item.get("browser_seq"),
+        "session_text": item.get("session_text") or "",
+        "tier_text": item.get("tier_text") or "",
+        "quantity": int(item.get("quantity") or 1),
+        "order_id": item.get("order_id"),          # 可能是 None
+        "page_url": item.get("page_url") or "",    # 兜底：留着人工去查
+        "locked_at": datetime.now().isoformat(timespec="seconds"),
+        # locked  已锁单，等人去付款（主要情况）
+        # manual  到了确认订单页但没锁上（条款没勾上/有必填项），等人工处理
+        # paid    已支付，人工标记
+        # expired 已过期，人工标记
+        "status": "locked",
+    }
+    with _lock:
+        data = _read_results()
+        data["items"].append(record)
+        _write(RESULTS_FILE, data)
+    return record
+
+
+def get_results() -> dict:
+    """返回全部战果，items 按锁单时间倒序（最新的在最前面）。"""
+    with _lock:
+        data = _read_results()
+    data["items"] = sorted(data["items"], key=lambda x: x.get("locked_at") or "", reverse=True)
+    return data
+
+
+def set_result_status(result_id: str, status: str) -> bool:
+    """标记某条战果的状态。付款是人工在浏览器里完成的，程序只能由人来标记。"""
+    if status not in ("locked", "manual", "paid", "expired"):
+        raise ValueError(f"未知状态：{status}")
+    with _lock:
+        data = _read_results()
+        for it in data["items"]:
+            if it["id"] == result_id:
+                it["status"] = status
+                _write(RESULTS_FILE, data)
+                return True
+    return False
+
+
+def delete_batch(batch_id: str) -> int:
+    """删掉一个批次及其全部记录，返回删掉的条数。"""
+    with _lock:
+        data = _read_results()
+        kept = [i for i in data["items"] if i.get("batch_id") != batch_id]
+        removed = len(data["items"]) - len(kept)
+        data["items"] = kept
+        data["batches"].pop(batch_id, None)
+        _write(RESULTS_FILE, data)
+        return removed
+
+
+# ------------------------------------------------------------------
 # 启动清理
 # ------------------------------------------------------------------
 
@@ -314,6 +425,10 @@ def reset_runtime_data(keep_event: bool = False) -> dict:
         owners = _read(OWNERS_FILE, {})
         cleared["owners"] = len(owners)
         _write(OWNERS_FILE, {})
+
+        # **results.json 刻意不清。** 它是整个流程的产出，不是运行时状态：
+        # 锁到的订单还等着人去付款，清掉就等于把付款凭据丢了。
+        # 要清战果只能在界面上按批次手动删。
 
         if keep_event:
             cleared["event"] = "保留"

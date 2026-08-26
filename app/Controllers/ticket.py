@@ -77,6 +77,16 @@ def do_grab():
                 )
             used_windows[bid] = label
 
+        # 窗口 ID -> 界面上显示的序号。战果记录里给的是序号，
+        # 因为付款时人要照着它去比特浏览器里找窗口，32 位的 ID 没法用。
+        # 拿不到就算了（比特浏览器没开等），序号只是方便人看，
+        # 不该因为它让整个抢票起不来。
+        seq_by_id = {}
+        try:
+            seq_by_id = {b["id"]: b.get("seq") for b in getAllBrowsers()}
+        except Exception:
+            pass
+
         # 把账号 + 配置组装成引擎要的任务列表，顺便校验配置是否完整
         tasks = []
         problems = []
@@ -104,6 +114,9 @@ def do_grab():
                 {
                     "browser_id": a["browser_id"],
                     "label": label,
+                    # 战果记录要用：付款时得知道去哪个号、哪个窗口里操作
+                    "email": a.get("email", ""),
+                    "browser_seq": seq_by_id.get(a["browser_id"]),
                     "session_text": plan["session_text"],
                     "tier_text": plan["tier_text"],
                     "quantity": int(plan.get("quantity") or 1),
@@ -140,6 +153,9 @@ def do_grab():
             "retry_interval_max": float(body.get("retry_interval_max", 4.0)),
             # 抢到后是否自动勾选条款并点「确认订单」完成锁单（仍然不付款）
             "auto_confirm": bool(body.get("auto_confirm", False)),
+            # 本轮战果归到哪个批次下。今天抢 A 活动、明天抢 B 活动，
+            # 记录不该混在一起，导出时也要能只导某一批。
+            "batch_id": store.start_batch(event),
         }
         stop_others = bool(body.get("stop_others_on_success", False))
 
@@ -297,6 +313,127 @@ def clear_login():
         return jsonify(code=200, result=msg)
     except BitBrowserNotRunning as e:
         return jsonify(code=500, result=str(e)), 500
+    except Exception as e:
+        return jsonify(code=500, result=str(e)), 500
+
+
+# ------------------------------------------------------------------
+# 抢票战果
+# ------------------------------------------------------------------
+
+# 状态在界面上的说法。后端存的是英文枚举，给人看要用人话。
+STATUS_LABELS = {
+    "locked": "待支付",
+    "manual": "需人工确认",
+    "paid": "已支付",
+    "expired": "已过期",
+}
+
+
+@ticket.route("/results", methods=["get"])
+def get_results():
+    """
+    返回全部战果，按批次分组信息一并带出。
+
+    这是整个流程的产出：程序只锁单不付款，每条记录都对应一个等着人去付的订单。
+    """
+    try:
+        data = store.get_results()
+        for it in data["items"]:
+            it["status_label"] = STATUS_LABELS.get(it.get("status"), it.get("status"))
+        return jsonify(code=200, **data)
+    except Exception as e:
+        return jsonify(code=500, result=str(e)), 500
+
+
+@ticket.route("/results/status", methods=["post"])
+def set_result_status():
+    """标记一条战果的状态。付款是人工在浏览器里做的，程序没法自己知道，只能由人来标。"""
+    try:
+        body = request.json or {}
+        result_id = body.get("id")
+        status = body.get("status")
+        if not result_id or not status:
+            return jsonify(code=400, result="缺少 id 或 status"), 400
+        if store.set_result_status(result_id, status):
+            return jsonify(code=200, result=f"已标记为{STATUS_LABELS.get(status, status)}")
+        return jsonify(code=404, result="找不到该记录"), 404
+    except ValueError as e:
+        return jsonify(code=400, result=str(e)), 400
+    except Exception as e:
+        return jsonify(code=500, result=str(e)), 500
+
+
+@ticket.route("/results/batch/delete", methods=["post"])
+def delete_result_batch():
+    """删掉一个批次的全部战果记录。"""
+    try:
+        batch_id = (request.json or {}).get("batch_id")
+        if not batch_id:
+            return jsonify(code=400, result="缺少 batch_id"), 400
+        n = store.delete_batch(batch_id)
+        return jsonify(code=200, result=f"已删除 {n} 条记录")
+    except Exception as e:
+        return jsonify(code=500, result=str(e)), 500
+
+
+@ticket.route("/results/export.csv", methods=["get"])
+def export_results_csv():
+    """
+    导出战果为 CSV。可选 ?batch_id=xxx 只导某一批。
+
+    两个刻意的选择：
+
+    1. **UTF-8 带 BOM**（utf-8-sig）。不带 BOM 的话 Excel 双击打开中文全是乱码，
+       而这个文件的使用者多半就是直接双击用 Excel 打开对账的。
+    2. **订单号加一个前导制表符**。Excel 会把 16 位纯数字当成数值，
+       显示成 1.5804E+15，订单号就废了。加 \t 强制按文本处理。
+    """
+    import csv
+    import io
+
+    try:
+        batch_id = request.args.get("batch_id")
+        data = store.get_results()
+        items = data["items"]
+        if batch_id:
+            items = [i for i in items if i.get("batch_id") == batch_id]
+
+        batches = data["batches"]
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow([
+            "活动", "抢票人", "账号", "窗口序号",
+            "场次", "票档", "张数", "订单号", "锁单时间", "状态", "订单页链接",
+        ])
+        for it in items:
+            b = batches.get(it.get("batch_id")) or {}
+            order_id = it.get("order_id")
+            w.writerow([
+                b.get("event_name", ""),
+                it.get("account_label", ""),
+                it.get("email", ""),
+                it.get("browser_seq") if it.get("browser_seq") is not None else "",
+                it.get("session_text", ""),
+                it.get("tier_text", ""),
+                it.get("quantity", ""),
+                # 前导 tab：不加的话 Excel 会把它变成科学计数法
+                f"\t{order_id}" if order_id else "未抓到，请到窗口内查看",
+                (it.get("locked_at") or "").replace("T", " "),
+                STATUS_LABELS.get(it.get("status"), it.get("status", "")),
+                it.get("page_url", ""),
+            ])
+
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return Response(
+            buf.getvalue().encode("utf-8-sig"),
+            # 用 content_type 而不是 mimetype：mimetype 里带 charset 的话
+            # Flask 会再追加一次，变成重复的 charset=utf-8; charset=utf-8
+            content_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="hkticket_results_{stamp}.csv"'
+            },
+        )
     except Exception as e:
         return jsonify(code=500, result=str(e)), 500
 

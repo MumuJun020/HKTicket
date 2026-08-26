@@ -113,6 +113,10 @@
       </div>
 
       <div class="flex-1"></div>
+      <!-- 待支付提醒：锁到的单有付款时限，漏付就白抢，所以放在顶栏常驻，
+           而不是埋在下面的战果卡片里等人自己去翻 -->
+      <button onclick="scrollToResults()" id="pending_badge" class="btn btn-sm hidden"
+              style="border-color:#b91c1c;color:#b91c1c" title="点击查看战果"></button>
       <button onclick="loginAll()" id="btn_login_all" class="btn btn-primary">一键启动并登录</button>
     </div>
   </header>
@@ -167,8 +171,11 @@
       </div>
     </section>
 
-    <!-- ---------- 右 ---------- -->
-    <section class="col-span-12 lg:col-span-8 xl:col-span-9 flex flex-col gap-6 min-w-0 min-h-0">
+    <!-- ---------- 右 ----------
+         overflow-y:auto 是兜底：整页锁死一屏时，右栏卡片一多（解析 + 配置 + 开抢 + 战果）
+         在矮屏上会顶出视口，而 body 是 overflow:hidden 的，顶出去的部分永远够不着。
+         内容装得下时不会出现滚动条，不影响正常观感。 -->
+    <section class="col-span-12 lg:col-span-8 xl:col-span-9 flex flex-col gap-6 min-w-0 min-h-0 scroll-y">
 
       <!-- 解析 -->
       <div class="card shrink-0">
@@ -265,6 +272,27 @@
             <button onclick="stopTicketTask()" id="btn_ticket_stop" style="display:none" class="btn btn-danger">停止</button>
           </div>
         </div>
+      </div>
+
+      <!-- 战果：整个流程的产出。程序只锁单不付款，这里每一条都对应一个等着人去付的订单。
+           不随启动清空，要清只能按批次手动删。 -->
+      <div class="card shrink-0" id="results_card">
+        <div class="hd px-4 h-10 flex items-center justify-between shrink-0">
+          <div class="flex items-center gap-2">
+            <h2 class="text-[13px] font-semibold">战果</h2>
+            <span id="results_summary" class="text-xs" style="color:var(--ink-3)"></span>
+          </div>
+          <div class="flex items-center gap-2">
+            <select id="results_batch" onchange="renderResults()" class="inp" style="width:auto;max-width:260px;font-size:12px;padding:3px 8px">
+              <option value="">全部批次</option>
+            </select>
+            <button onclick="exportResults()" id="btn_export_results" class="btn btn-sm">导出 CSV</button>
+            <button onclick="deleteResultBatch()" id="btn_del_batch" class="btn btn-sm btn-danger">删除本批</button>
+          </div>
+        </div>
+        <!-- 高度跟着视口走：固定 260px 在 1366x768 这种笔记本上会把卡片顶出屏幕，
+             而整页是 overflow:hidden 的，顶出去就够不着了 -->
+        <div id="results_body" class="scroll-y" style="max-height:min(260px, 26vh)"></div>
       </div>
     </section>
   </main>
@@ -384,6 +412,9 @@
             const e = d.data;
             if (isGlobalMode && currentTaskId && e.task_id === currentTaskId) return;
             appendLog(e.message, e.level);
+            // 抢中就立刻刷新战果。这是用户最想立刻看到的东西——
+            // 锁到的单在等付款，不该让他刷页面才看得见。
+            if (e.message.includes("已记入战果")) loadResults();
             if (e.message.includes("抢票完成，成功账号") || e.message.includes("抢票结束，所有账号均未成功")) {
               setTimeout(() => {
                 if (currentTicketTaskId) {
@@ -391,6 +422,7 @@
                   if (currentTaskId === currentTicketTaskId) stopLogPolling();
                   currentTicketTaskId = null;
                 }
+                loadResults();   // 收尾再拉一次，确保并发写入的都到齐了
               }, 500);
             }
             if (e.message.includes("一键登录结束") || e.message.includes("所有账号都已登录")) {
@@ -1055,8 +1087,146 @@
       closePicker();
     });
 
+
+    // ---------- 战果 ----------
+    // 这是整个流程的产出：程序只锁单不付款，每条记录都是一个等着人去付的订单。
+    let resultsData = { batches: {}, items: [] };
+
+    function loadResults() {
+      return fetch("/ticket/results").then(r => r.json()).then(d => {
+        if (d.code !== 200) return;
+        resultsData = { batches: d.batches || {}, items: d.items || [] };
+        renderBatchOptions();
+        renderResults();
+      }).catch(() => {});
+    }
+
+    function renderBatchOptions() {
+      const sel = document.getElementById("results_batch");
+      const keep = sel.value;
+      // 批次按开始时间倒序，最近抢的那批排最前面——通常就是你想看的那批
+      const list = Object.values(resultsData.batches)
+        .sort((a, b) => (b.started_at || "").localeCompare(a.started_at || ""));
+      sel.innerHTML = '<option value="">全部批次</option>' + list.map(b => {
+        const when = (b.started_at || "").replace("T", " ").slice(5, 16);
+        return `<option value="${b.batch_id}">${when} ${escapeHtml(b.event_name)}</option>`;
+      }).join("");
+      if ([...sel.options].some(o => o.value === keep)) sel.value = keep;
+    }
+
+    function currentResultItems() {
+      const bid = document.getElementById("results_batch").value;
+      return bid ? resultsData.items.filter(i => i.batch_id === bid) : resultsData.items;
+    }
+
+    function renderResults() {
+      const items = currentResultItems();
+      const body = document.getElementById("results_body");
+      const pending = items.filter(i => i.status === "locked" || i.status === "manual");
+
+      // 顶栏常驻提醒：待支付的单有时限，漏付就白抢
+      const badge = document.getElementById("pending_badge");
+      const allPending = resultsData.items.filter(i => i.status === "locked" || i.status === "manual").length;
+      badge.textContent = allPending ? `待处理 ${allPending}` : "";
+      badge.classList.toggle("hidden", allPending === 0);
+
+      document.getElementById("results_summary").textContent =
+        items.length ? `共 ${items.length} 单，待处理 ${pending.length}` : "";
+      document.getElementById("btn_export_results").disabled = items.length === 0;
+      document.getElementById("btn_del_batch").disabled = !document.getElementById("results_batch").value;
+
+      if (!items.length) {
+        body.innerHTML = `<div class="py-8 text-center text-[13px]" style="color:var(--ink-3)">
+          还没有抢到的订单<br><span class="text-xs">抢中并锁单后会自动记录在这里</span></div>`;
+        return;
+      }
+
+      // 待处理的排在最前面：这些是需要你现在就去做事的
+      const order = { locked: 0, manual: 1, paid: 2, expired: 3 };
+      const sorted = [...items].sort((a, b) =>
+        (order[a.status] ?? 9) - (order[b.status] ?? 9) ||
+        (b.locked_at || "").localeCompare(a.locked_at || ""));
+
+      // 固定列宽 + 表头不换行：不设的话浏览器会按内容自动分配，
+      // 结果是「张数」这种两字表头被折成两行、「需人工确认」被压成竖排。
+      // 场次/票档最长，给它剩余空间并溢出省略，鼠标悬停看全文。
+      body.innerHTML = `<table class="tb" style="table-layout:fixed">
+        <colgroup>
+          <col style="width:15%"><col><col style="width:52px">
+          <col style="width:19%"><col style="width:11%"><col style="width:76px"><col style="width:132px">
+        </colgroup>
+        <thead><tr>
+          <th class="whitespace-nowrap">抢票人</th><th class="whitespace-nowrap">场次 / 票档</th>
+          <th class="whitespace-nowrap">张数</th><th class="whitespace-nowrap">订单号</th>
+          <th class="whitespace-nowrap">锁单时间</th><th class="whitespace-nowrap">状态</th><th></th>
+        </tr></thead><tbody>` + sorted.map(it => {
+        const seq = it.browser_seq != null ? `窗口 ${it.browser_seq}` : "";
+        // 订单号抓不到时给的是可操作的指引，而不是一个空格子——
+        // 用户看到空的会以为出错了，实际上票是抢到了的
+        const orderCell = it.order_id
+          ? `<span style="font-variant-numeric:tabular-nums">${escapeHtml(it.order_id)}</span>`
+          : `<span class="text-xs" style="color:var(--ink-3)" title="订单号没抓到，请打开${seq || "对应窗口"}在页面上查看">未抓到 · 见${seq || "窗口"}</span>`;
+        const statusStyle = (it.status === "locked" || it.status === "manual")
+          ? 'style="color:#b91c1c;font-weight:600"' : 'style="color:var(--ink-3)"';
+        const actions = (it.status === "locked" || it.status === "manual")
+          ? `<button onclick="markResult('${it.id}','paid')" class="btn btn-sm">标记已付</button>
+             <button onclick="markResult('${it.id}','expired')" class="btn btn-sm">已过期</button>`
+          : `<button onclick="markResult('${it.id}','locked')" class="btn btn-sm">撤销标记</button>`;
+        return `<tr>
+          <td class="truncate" title="${escapeHtml(it.account_label)} ${escapeHtml(it.email || "")}">
+              <div class="truncate">${escapeHtml(it.account_label)}</div>
+              <div class="text-xs truncate" style="color:var(--ink-3)">${escapeHtml(it.email || "")} ${seq}</div></td>
+          <td title="${escapeHtml(it.session_text)} / ${escapeHtml(it.tier_text)}">
+              <div class="text-xs truncate">${escapeHtml(it.session_text)}</div>
+              <div class="text-xs truncate" style="color:var(--ink-2)">${escapeHtml(it.tier_text)}</div></td>
+          <td>${it.quantity}</td>
+          <td class="truncate">${orderCell}</td>
+          <td class="text-xs whitespace-nowrap" style="color:var(--ink-2)">${escapeHtml((it.locked_at || "").replace("T", " ").slice(5))}</td>
+          <td class="text-xs whitespace-nowrap" ${statusStyle}>${escapeHtml(it.status_label || it.status)}</td>
+          <td class="text-right whitespace-nowrap">${actions}</td>
+        </tr>`;
+      }).join("") + "</tbody></table>";
+    }
+
+    function markResult(id, status) {
+      fetch("/ticket/results/status", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, status })
+      }).then(r => r.json()).then(d => {
+        appendLog(d.result, d.code === 200 ? "info" : "error");
+        if (d.code === 200) loadResults();
+      }).catch(e => appendLog(`标记失败: ${e.message}`, "error"));
+    }
+
+    function exportResults() {
+      const bid = document.getElementById("results_batch").value;
+      // 直接跳转让浏览器走下载，不用 fetch——fetch 拿到的是内存里的数据，
+      // 还得自己造 blob 和 <a download>，没必要
+      window.location.href = "/ticket/results/export.csv" + (bid ? `?batch_id=${bid}` : "");
+    }
+
+    function deleteResultBatch() {
+      const bid = document.getElementById("results_batch").value;
+      if (!bid) return;
+      const b = resultsData.batches[bid];
+      const n = resultsData.items.filter(i => i.batch_id === bid).length;
+      if (!confirm(`确定删除「${b ? b.event_name : bid}」这一批的 ${n} 条记录？\n\n删了就找不回来了，建议先导出 CSV。`)) return;
+      fetch("/ticket/results/batch/delete", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ batch_id: bid })
+      }).then(r => r.json()).then(d => {
+        appendLog(d.result, d.code === 200 ? "warning" : "error");
+        if (d.code === 200) { document.getElementById("results_batch").value = ""; loadResults(); }
+      }).catch(e => appendLog(`删除失败: ${e.message}`, "error"));
+    }
+
+    function scrollToResults() {
+      document.getElementById("results_card").scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+
     document.addEventListener("DOMContentLoaded", () => {
       initGlobalLogStream();
+      loadResults();
       loadBrowsers().then(loadAccounts).then(loadPlans).then(loadEvent)
         .then(() => { if (accounts.length) refreshLoginStatus(); });
     });

@@ -60,6 +60,7 @@ from typing import Optional
 from playwright.async_api import Playwright, Page
 
 from . import ticket_api
+from . import ticket_store as store
 from .bit_api import openBrowser
 from ..utils.logger import task_state_manager
 
@@ -240,9 +241,16 @@ async def grab_ticket_on_page(
                 print(f"[{browser_id}] 已进入确认订单页")
                 if obj.get("auto_confirm"):
                     # 勾选条款并锁单。锁单到此为止，**不做任何支付动作**
-                    await confirm_order(page, browser_id)
+                    locked = await confirm_order(page, browser_id)
                 else:
                     print(f"[{browser_id}] 未开启自动确认，已停在确认订单页，请手动完成")
+                    locked = False
+
+                # 记战果。**锁没锁上都要记**：
+                # 锁上了要留订单号去付款；没锁上（条款没勾上、有必填项没填）
+                # 说明这一单已经占住位置、正等着人工去处理，
+                # 这种情况反而更需要提醒——不记的话用户根本不知道有单等着他。
+                await _record_result(page, browser_id, obj, locked)
                 return True
             else:
                 print(f"[{browser_id}] 本次尝试未成功（可能售罄/被顶掉），准备重试")
@@ -305,6 +313,55 @@ class WaitingForRestock(Exception):
 RATE_LIMIT_FAILURE_THRESHOLD = 3   # 连续失败几次开始怀疑被限流
 RATE_LIMIT_BACKOFF_BASE = 15       # 首次退避秒数
 RATE_LIMIT_BACKOFF_MAX = 300       # 退避上限，5 分钟
+
+# 订单号形如 1580400200000181：16 位数字。放宽到 14~20 位，
+# 站点改了长度也还能抓到，不至于因为多一位少一位就整个失效。
+ORDER_ID_RE = re.compile(r"\b(\d{14,20})\b")
+
+# 支付页 URL 上带订单标识的参数名。站点用过 orderId，
+# 但同类站点也常见 orderToken/orderNo，一并试，取第一个匹配上的。
+ORDER_URL_KEYS = ("orderId", "orderToken", "orderNo", "orderid", "order_id")
+
+
+async def extract_order_id(page: Page, label: str) -> Optional[str]:
+    """
+    锁单成功后从支付页上把订单号抓下来。
+
+    **抓不到不是错误。** 这个函数依赖页面结构和 URL 参数，站点一改版就可能失效；
+    但"这个人抢到了"这件事本身比订单号更重要——调用方必须在抓不到时照样记录战果，
+    只是订单号留空、提示用户去窗口里自己看。为这个抓不到就丢掉整条记录，
+    等于让用户以为没抢到，直接错过付款。
+
+    三条路依次试，都很便宜：
+        1. URL 参数（最可靠，锁单后一般会跳到 /pay?orderId=xxx 这类地址）
+        2. URL 路径里的长数字（有些站点是 /order/1580400200000181 这种形式）
+        3. 页面文本里「订单号」附近的长数字（前两条都没有时的兜底）
+    """
+    try:
+        url = page.url or ""
+
+        # 1) URL 查询参数
+        for key in ORDER_URL_KEYS:
+            m = re.search(rf"[?&]{key}=(\d{{14,20}})", url)
+            if m:
+                return m.group(1)
+
+        # 2) URL 路径里的长数字。要排除 projectId——活动页 URL 里也有同样长度的数字，
+        #    直接扫全 URL 会把活动 ID 当成订单号。
+        path_part = re.sub(r"projectId=\d+", "", url)
+        m = ORDER_ID_RE.search(path_part)
+        if m:
+            return m.group(1)
+
+        # 3) 页面文本兜底：找「订单号/訂單編號/Order」后面跟着的长数字
+        text = await page.inner_text("body", timeout=3000)
+        m = re.search(r"(?:订单号|訂單編號|订单编号|Order\s*(?:No|Number)?)\D{0,10}(\d{14,20})", text)
+        if m:
+            return m.group(1)
+    except Exception as e:
+        print(f"[{label}] 抓取订单号时出错（不影响战果记录）：{e}")
+    return None
+
 
 AGREEMENT_BOX = ".agreementCheckBox___prwOG"
 AGREEMENT_ICON = ".agreementIcon___l58tx"
@@ -523,6 +580,54 @@ async def _set_quantity(page: Page, browser_id: str, quantity: int) -> int:
         current = new_num
 
     return current
+
+
+async def _record_result(page: Page, label: str, obj: dict, locked: bool) -> None:
+    """
+    把一次抢中落到战果记录里。
+
+    这是整个流程唯一的产出留存点。程序只锁单不付款，锁到的订单在等人去付、
+    而且有付款时限；十个号并发抢完，谁抢到了、哪场、订单号多少，
+    这些只存在于滚动过去的日志里等于没有。
+
+    **绝不让这里的异常影响抢票结果。** 记录失败最多是少一条账，
+    但如果因为写文件出错把已经抢到的流程搞崩，那是把大事搞砸了。
+    """
+    try:
+        batch_id = obj.get("batch_id")
+        if not batch_id:
+            # 没有批次说明是直接调 run_single_browser 的调试路径，不记
+            return
+
+        order_id = await extract_order_id(page, label) if locked else None
+        if locked and not order_id:
+            print(
+                f"[{label}] 锁单成功但没抓到订单号，已记录战果；"
+                f"请到该窗口里查看订单号并尽快付款"
+            )
+
+        rec = store.add_result(
+            batch_id,
+            {
+                "account_label": obj.get("account_label") or label,
+                "email": obj.get("email"),
+                "browser_id": obj.get("browser_id"),
+                "browser_seq": obj.get("browser_seq"),
+                "session_text": obj.get("session_text"),
+                "tier_text": obj.get("tier_text"),
+                "quantity": obj.get("quantity"),
+                "order_id": order_id,
+                "page_url": page.url,
+            },
+        )
+        if not locked:
+            store.set_result_status(rec["id"], "manual")
+            print(f"[{label}] 已记入战果：需人工完成确认订单")
+        else:
+            tail = f"，订单号 {order_id}" if order_id else ""
+            print(f"[{label}] 已记入战果：待支付{tail}")
+    except Exception as e:
+        print(f"[{label}] 写战果记录失败（不影响抢票结果）：{e}")
 
 
 async def confirm_order(page: Page, label: str) -> bool:
@@ -821,6 +926,11 @@ async def run(
                 "session_text": t.get("session_text", ""),
                 "tier_text": t.get("tier_text", ""),
                 "quantity": int(t.get("quantity", 1)),
+                # 下面几项只用于战果记录，抢票流程本身不读
+                "account_label": t.get("label", ""),
+                "email": t.get("email", ""),
+                "browser_id": t.get("browser_id", ""),
+                "browser_seq": t.get("browser_seq"),
             }
         )
         try:
