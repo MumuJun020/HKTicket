@@ -276,6 +276,177 @@ def delete_account():
         return jsonify(code=500, result=str(e)), 500
 
 
+@ticket.route("/accounts/import", methods=["post"])
+def import_accounts():
+    """
+    从 CSV 批量导入抢票人。
+
+    请求体：{"csv": "<文件内容>", "commit": false}
+        commit=false（默认）只解析和校验，返回预览，**不写任何数据**
+        commit=true  真正写入
+
+    为什么要两步：直接导入的话，一个格式错误就可能污染整份数据，而且人事后
+    不容易发现哪一行错了。先给出"将新增 N 个、更新 M 个、哪几行有问题"，
+    看清楚再决定。
+
+    列名（第一行必须是表头，顺序随意，多余的列忽略）：
+        备注, 账号, 密码, 窗口序号
+    窗口用**序号**而不是 ID：ID 是 32 位十六进制，人没法手填；
+    序号就是比特浏览器界面上显示的那个数字。
+    """
+    import csv
+    import io
+
+    try:
+        body = request.json or {}
+        raw = body.get("csv") or ""
+        commit = bool(body.get("commit"))
+        if not raw.strip():
+            return jsonify(code=400, result="文件是空的"), 400
+
+        # utf-8-sig：Excel 导出的 CSV 带 BOM，不剥掉的话第一个列名会变成
+        # "\ufeff备注"，导致表头匹配不上
+        if raw.startswith("\ufeff"):
+            raw = raw[1:]
+
+        reader = csv.DictReader(io.StringIO(raw))
+        if not reader.fieldnames:
+            return jsonify(code=400, result="读不出表头，请确认第一行是列名"), 400
+
+        headers = {(h or "").strip(): h for h in reader.fieldnames}
+
+        def col(row, *names):
+            for n in names:
+                if n in headers:
+                    return (row.get(headers[n]) or "").strip()
+            return ""
+
+        missing = [n for n in ("账号",) if n not in headers]
+        if missing:
+            return (
+                jsonify(code=400,
+                        result=f"缺少必需的列：{'、'.join(missing)}。"
+                               f"当前表头是：{'、'.join(reader.fieldnames)}"),
+                400,
+            )
+
+        # 窗口序号 -> ID
+        id_by_seq = {}
+        conn_err = None
+        try:
+            for b in getAllBrowsers():
+                if b.get("seq") is not None:
+                    id_by_seq[str(b["seq"])] = b["id"]
+        except Exception as e:
+            conn_err = str(e)
+
+        existing = store.get_accounts()
+        by_email = {a["email"].lower(): a for a in existing}
+        # 已被占用的窗口（排除同邮箱的本人，那是更新不是冲突）
+        taken = {a.get("browser_id"): a for a in existing if a.get("browser_id")}
+
+        rows = []
+        seen_emails = set()
+        seen_seqs = {}
+        ok_count = new_count = update_count = 0
+
+        for i, row in enumerate(reader, start=2):   # 第 1 行是表头
+            email = col(row, "账号", "邮箱", "email")
+            password = col(row, "密码", "password")
+            remark = col(row, "备注", "姓名", "remark")
+            seq = col(row, "窗口序号", "窗口", "seq")
+
+            issues = []
+            if not email:
+                issues.append("账号为空")
+            elif "@" not in email or "." not in email.split("@")[-1]:
+                issues.append("账号不像邮箱")
+            elif email.lower() in seen_emails:
+                issues.append("文件内账号重复")
+            else:
+                seen_emails.add(email.lower())
+
+            is_update = email.lower() in by_email
+            if not password and not is_update:
+                issues.append("密码为空（新增必须填）")
+
+            browser_id = ""
+            if seq:
+                if conn_err:
+                    issues.append("连不上比特浏览器，无法校验窗口序号")
+                elif seq not in id_by_seq:
+                    issues.append(f"窗口序号 {seq} 不存在")
+                else:
+                    browser_id = id_by_seq[seq]
+                    if seq in seen_seqs:
+                        issues.append(f"文件内窗口 {seq} 被分配了多次")
+                    else:
+                        seen_seqs[seq] = email
+                    other = taken.get(browser_id)
+                    if other and other["email"].lower() != email.lower():
+                        who = other.get("remark") or other["email"]
+                        issues.append(f"窗口 {seq} 已绑定给「{who}」")
+
+            if not issues:
+                ok_count += 1
+                if is_update:
+                    update_count += 1
+                else:
+                    new_count += 1
+
+            rows.append({
+                "line": i, "email": email, "remark": remark, "seq": seq,
+                "has_password": bool(password),
+                "action": "更新" if is_update else "新增",
+                "issues": issues,
+            })
+
+        if not rows:
+            return jsonify(code=400, result="文件里没有数据行"), 400
+
+        summary = f"将新增 {new_count} 人、更新 {update_count} 人"
+        bad = len(rows) - ok_count
+        if bad:
+            summary += f"；{bad} 行有问题会被跳过"
+
+        if not commit:
+            return jsonify(code=200, preview=True, rows=rows, summary=summary,
+                           ok_count=ok_count, bad_count=bad)
+
+        # 真正写入：只写没问题的行
+        saved = 0
+        errors = []
+        reader2 = csv.DictReader(io.StringIO(raw))
+        for i, row in enumerate(reader2, start=2):
+            meta = next((r for r in rows if r["line"] == i), None)
+            if not meta or meta["issues"]:
+                continue
+            email = col(row, "账号", "邮箱", "email")
+            payload = {
+                "email": email,
+                "password": col(row, "密码", "password"),
+                "remark": col(row, "备注", "姓名", "remark"),
+                "browser_id": id_by_seq.get(col(row, "窗口序号", "窗口", "seq"), ""),
+            }
+            old = by_email.get(email.lower())
+            if old:
+                payload["id"] = old["id"]
+            try:
+                store.save_account(payload)
+                saved += 1
+            except ValueError as e:
+                errors.append(f"第 {i} 行：{e}")
+
+        msg = f"已导入 {saved} 人"
+        if bad:
+            msg += f"，跳过 {bad} 行有问题的"
+        if errors:
+            msg += "；" + "；".join(errors[:3])
+        return jsonify(code=200, preview=False, result=msg, saved=saved)
+    except Exception as e:
+        return jsonify(code=500, result=str(e)), 500
+
+
 @ticket.route("/accounts/clear_login", methods=["post"])
 def clear_login():
     """
@@ -612,6 +783,187 @@ def browsers():
     except Exception as e:
         # 最常见的是比特浏览器客户端未登录（token 失效），把原始 msg 透传给前端
         return jsonify(code=500, result=f"获取窗口列表失败：{str(e)}"), 500
+
+
+def _run_sync(coro_factory, timeout=120):
+    """
+    在请求线程里同步跑一段 playwright 协程。
+
+    为什么要另起线程：Playwright 的同步/异步 API 不能在已有事件循环里直接跑，
+    而 Flask 的请求处理是同步的。起一个线程、在里面 asyncio.run 是最省事的做法。
+
+    :raises TimeoutError: 超时。宁可报超时也不要让请求一直挂着——
+        页面上转圈转到天荒地老比报错更难排查。
+    """
+    box = {}
+
+    def _thread():
+        try:
+            async def _run():
+                async with async_playwright() as pw:
+                    box["data"] = await coro_factory(pw)
+            asyncio.run(_run())
+        except Exception as e:
+            box["error"] = e
+
+    t = threading.Thread(target=_thread, daemon=True)
+    t.start()
+    t.join(timeout=timeout)
+    if t.is_alive():
+        raise TimeoutError("操作超时")
+    if "error" in box:
+        raise box["error"]
+    return box.get("data")
+
+
+@ticket.route("/preflight", methods=["get"])
+def preflight():
+    """
+    开抢前自检：逐个抢票人检查"到点能不能真的抢"，给出红绿灯。
+
+    要解决的是最惨的失败模式——**到了开抢那一秒才发现某个人没登录、
+    某个人的配置是上个活动的**。抢票循环里确实会检查登录态
+    （ticket_operation 第一轮就查），但那时候已经晚了。
+    这个接口让你在开抢前十分钟就能看到问题，还来得及修。
+
+    检查项都是**只读且便宜**的，不开新窗口、不点任何购买按钮：
+        1. 绑没绑窗口
+        2. 窗口在不在（比特浏览器里还存不存在这个 ID）
+        3. 登录态（只查已打开的窗口，没开的窗口如实报"窗口未打开"）
+        4. 配置完整性 + 是否属于当前解析的活动
+        5. 窗口有没有被重复绑定
+
+    返回每个人一条结果，level 取 ok / warn / error：
+        error 到点一定抢不了，必须修
+        warn  可能有问题（比如窗口没开，登录态查不到）
+        ok    没发现问题
+    """
+    try:
+        accounts = store.get_accounts()
+        plans = store.get_plans()
+        event = store.get_event()
+
+        items = []
+        overall_error = 0
+        overall_warn = 0
+
+        if not accounts:
+            return jsonify(code=200, items=[], summary="还没有添加抢票人",
+                           error_count=1, warn_count=0)
+
+        valid_sessions = {s["text"] for s in event.get("sessions", [])}
+        valid_tiers = {t["text"] for s in event.get("sessions", []) for t in s["tiers"]}
+
+        # 窗口是否还存在。比特浏览器连不上时拿不到，这种情况整体报错即可
+        existing = None
+        conn_err = None
+        try:
+            existing = {b["id"]: b for b in getAllBrowsers()}
+        except Exception as e:
+            conn_err = str(e)
+
+        # 已登录状态：复用现成的检查，只查已打开的窗口，不弹新窗口
+        status_map = {}
+        if conn_err is None:
+            try:
+                rows = _run_sync(
+                    lambda pw: check_login_status(pw, accounts, open_closed_windows=False)
+                )
+                status_map = {r["account_id"]: r for r in rows}
+            except Exception:
+                pass
+
+        # 重复绑定检查
+        seen = {}
+        dup_ids = set()
+        for a in accounts:
+            bid = a.get("browser_id")
+            if not bid:
+                continue
+            if bid in seen:
+                dup_ids.add(a["id"])
+                dup_ids.add(seen[bid])
+            seen[bid] = a["id"]
+
+        for a in accounts:
+            label = a.get("remark") or a.get("email")
+            problems = []
+            level = "ok"
+
+            bid = a.get("browser_id")
+            if not bid:
+                problems.append("没绑定浏览器窗口")
+                level = "error"
+            elif a["id"] in dup_ids:
+                problems.append("和别人绑了同一个窗口，并发抢票会互相干扰")
+                level = "error"
+            elif existing is not None and bid not in existing:
+                problems.append("绑定的窗口在比特浏览器里已不存在，请重新选择")
+                level = "error"
+
+            plan = plans.get(a["id"]) or {}
+            if not event.get("sessions"):
+                problems.append("还没解析活动")
+                level = "error"
+            elif not plan.get("session_text") or not plan.get("tier_text"):
+                problems.append("还没配置场次或票档")
+                level = "error"
+            else:
+                if plan["session_text"] not in valid_sessions:
+                    problems.append(f"配的场次不属于当前活动（{event.get('name')}）")
+                    level = "error"
+                if plan["tier_text"] not in valid_tiers:
+                    problems.append("配的票档不属于当前活动")
+                    level = "error"
+
+            st = status_map.get(a["id"], {})
+            if conn_err:
+                problems.append("连不上比特浏览器，无法检查登录态")
+                if level != "error":
+                    level = "warn"
+            elif st.get("status") == "logged_in":
+                # 登录着还不够，还要确认登录的就是本人（换人复用窗口的坑）
+                owner = store.get_window_owner(bid)
+                if owner and owner.get("email") == (a.get("email") or "").strip():
+                    pass
+                else:
+                    problems.append("窗口登录的可能不是本人，开抢前会自动清除并要求重新登录")
+                    if level != "error":
+                        level = "warn"
+            elif st.get("status") == "logged_out":
+                problems.append("未登录，请先执行「一键启动并登录」")
+                level = "error"
+            elif st.get("status") == "window_closed":
+                problems.append("窗口未打开，登录态未知")
+                if level != "error":
+                    level = "warn"
+
+            if level == "error":
+                overall_error += 1
+            elif level == "warn":
+                overall_warn += 1
+
+            items.append({
+                "account_id": a["id"],
+                "label": label,
+                "email": a.get("email"),
+                "level": level,
+                "problems": problems,
+                "plan": f"{plan.get('session_text', '')} / {plan.get('tier_text', '')} x{plan.get('quantity', 1)}"
+                        if plan.get("session_text") else "",
+            })
+
+        if overall_error:
+            summary = f"{overall_error} 人到点抢不了，需要处理"
+        elif overall_warn:
+            summary = f"{overall_warn} 人有提示，其余就绪"
+        else:
+            summary = f"{len(items)} 人全部就绪"
+
+        return jsonify(code=200, items=items, summary=summary,
+                       error_count=overall_error, warn_count=overall_warn)
+    except Exception as e:
+        return jsonify(code=500, result=str(e)), 500
 
 
 @ticket.route("/active_task", methods=["get"])

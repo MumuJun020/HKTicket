@@ -64,6 +64,26 @@
     table.tb td { padding:9px 10px; border-bottom:1px solid var(--line-2); vertical-align:middle; }
     table.tb tr:last-child td { border-bottom:none; }
 
+    /* Toast：关键操作的即时反馈。
+       原来所有反馈都只进左下角的日志框——那块在 1440 宽的屏幕上只占约 12% 面积、
+       字号又小，视线焦点根本不在那。用户点了「立即抢票」看不到任何反应，
+       会以为卡住了然后反复点。过程信息仍然留在日志里，这里只报操作结果。 */
+    .toast-wrap { position:fixed; top:70px; left:50%; transform:translateX(-50%);
+                  z-index:80; display:flex; flex-direction:column; gap:8px; align-items:center;
+                  pointer-events:none; }
+    .toast { padding:9px 18px; border-radius:6px; font-size:13px; background:var(--ink); color:#fff;
+             box-shadow:0 8px 24px rgba(0,0,0,.18); animation:toastIn .16s ease-out;
+             max-width:min(560px, 90vw); }
+    .toast.err { background:#b91c1c; }
+    .toast.warn { background:#fff; color:var(--ink); border:1px solid var(--line); }
+    @keyframes toastIn { from { opacity:0; transform:translateY(-6px); } to { opacity:1; transform:none; } }
+
+    /* 标签页按钮：未选中是弱灰，选中是主色 + 下划线。
+       整套设计只用黑白灰，选中态靠字重和下划线区分而不是换颜色。 */
+    .tab-btn { color:var(--ink-3); padding:0 0 2px; border-bottom:2px solid transparent; transition:.12s; }
+    .tab-btn:hover { color:var(--ink-2); }
+    .tab-btn.tab-on { color:var(--ink); border-bottom-color:var(--ink); }
+
     .tag { font-size:11px; padding:2px 7px; border-radius:4px; border:1px solid var(--line); color:var(--ink-2); }
     .tag-out { color:var(--ink-3); text-decoration:line-through; background:var(--line-2); }
 
@@ -121,6 +141,17 @@
     </div>
   </header>
 
+  <!-- 连不上比特浏览器时的横幅。这是整个工具唯一的硬阻塞条件：
+       连不上就没有窗口可选、没法登录、没法抢票。原来这个错误只在左下角
+       日志区打一行小灰字，用户看不到，只会觉得「点了没反应」。 -->
+  <div id="conn_banner" class="hidden shrink-0 px-6 py-2.5 flex items-center gap-3 text-[13px]"
+       style="background:#fef2f2;border-bottom:1px solid #fecaca;color:#991b1b">
+    <span class="font-semibold">未连接比特浏览器</span>
+    <span id="conn_banner_msg" style="color:#b91c1c"></span>
+    <div class="flex-1"></div>
+    <button onclick="loadBrowsers()" class="btn btn-sm" style="border-color:#fca5a5;color:#991b1b">重试连接</button>
+  </div>
+
   <!-- 满屏自适应：宽度跟着视口走，高度占满剩余一屏。
        min-h-0 是关键——没有它，flex 子项不会收缩，内部的 overflow 就不生效。 -->
   <main class="flex-1 min-h-0 w-full px-6 py-6 grid grid-cols-12 gap-6">
@@ -131,12 +162,14 @@
       <div class="card flex flex-col min-h-0" style="flex:3 1 0">
         <div class="hd px-4 h-12 flex items-center justify-between shrink-0">
           <div class="flex items-baseline gap-2">
-            <h2 class="text-[13px] font-semibold">抢票人</h2>
+            <h2 class="text-[13px] font-semibold">① 抢票人</h2>
             <span id="account_count" class="text-xs" style="color:var(--ink-3)"></span>
           </div>
           <div class="flex gap-1.5">
             <button onclick="toggleSelectMode()" id="btn_select_mode" class="btn btn-sm">选择</button>
             <button onclick="loadBrowsers()" id="btn_load_browsers" class="btn btn-sm">窗口</button>
+            <button onclick="document.getElementById('csv_file').click()" class="btn btn-sm">导入</button>
+            <input type="file" id="csv_file" accept=".csv,text/csv" class="hidden" onchange="onCsvPicked(this)" />
             <button onclick="openAccountModal()" class="btn btn-sm btn-primary">新增</button>
           </div>
         </div>
@@ -171,16 +204,13 @@
       </div>
     </section>
 
-    <!-- ---------- 右 ----------
-         overflow-y:auto 是兜底：整页锁死一屏时，右栏卡片一多（解析 + 配置 + 开抢 + 战果）
-         在矮屏上会顶出视口，而 body 是 overflow:hidden 的，顶出去的部分永远够不着。
-         内容装得下时不会出现滚动条，不影响正常观感。 -->
-    <section class="col-span-12 lg:col-span-8 xl:col-span-9 flex flex-col gap-6 min-w-0 min-h-0 scroll-y">
+    <!-- ---------- 右 ---------- -->
+    <section class="col-span-12 lg:col-span-8 xl:col-span-9 flex flex-col gap-6 min-w-0 min-h-0">
 
       <!-- 解析 -->
       <div class="card shrink-0">
         <div class="hd px-4 h-12 flex items-center gap-3">
-          <h2 class="text-[13px] font-semibold whitespace-nowrap">票务解析</h2>
+          <h2 class="text-[13px] font-semibold whitespace-nowrap">② 票务解析</h2>
           <input type="text" id="parse_event_url" class="inp flex-1 min-w-0"
             placeholder="活动详情页链接，或直接填 projectId" />
           <button onclick="parseEvent()" id="btn_parse" class="btn btn-primary">解析</button>
@@ -193,20 +223,40 @@
         </div>
       </div>
 
-      <!-- 配置：flex-1 吃掉中间的剩余高度，这样右栏底边和左栏对齐；
-           人多时表格自己内部滚，不会把「开抢」挤出屏幕 -->
+      <!-- 配置 / 战果：合成一张卡用标签页切换。
+           这两块不需要同时看——配置是开抢前用的，战果是抢完后看的。
+           拆成两张卡竖着堆的话，右栏在 1366x768 这类笔记本上会顶出视口，
+           而整页是 overflow:hidden 的，顶出去就够不着了。
+           合并之后高度跟只有配置时一样，整页仍然锁死一屏。 -->
       <div class="card flex-1 flex flex-col min-h-[200px]">
         <div class="hd px-4 h-12 flex items-center gap-3 shrink-0">
-          <h2 class="text-[13px] font-semibold whitespace-nowrap">配置每个人抢什么</h2>
+          <button onclick="switchRightTab('plans')" id="tab_plans"
+                  class="tab-btn tab-on text-[13px] font-semibold whitespace-nowrap">③ 配置每个人抢什么</button>
+          <button onclick="switchRightTab('results')" id="tab_results"
+                  class="tab-btn text-[13px] font-semibold whitespace-nowrap">战果<span id="tab_results_badge"></span></button>
           <span id="plan_summary" class="text-xs" style="color:var(--ink-3)"></span>
+          <span id="results_summary" class="text-xs hidden" style="color:var(--ink-3)"></span>
           <div class="flex-1"></div>
+
+          <!-- 配置态的工具 -->
           <span id="plan_save_state" class="text-xs" style="color:var(--ink-3)"></span>
           <select id="bulk_session" class="inp btn-sm" style="width:auto;max-width:220px;padding:4px 8px">
             <option value="">批量设置场次…</option>
           </select>
-          <button onclick="applyBulk()" class="btn btn-sm">应用到全部</button>
+          <button onclick="applyBulk()" id="btn_apply_bulk" class="btn btn-sm">应用到全部</button>
+
+          <!-- 战果态的工具 -->
+          <select id="results_batch" onchange="renderResults()" class="inp hidden"
+                  style="width:auto;max-width:240px;font-size:12px;padding:3px 8px">
+            <option value="">全部批次</option>
+          </select>
+          <button onclick="exportResults()" id="btn_export_results" class="btn btn-sm hidden">导出 CSV</button>
+          <button onclick="deleteResultBatch()" id="btn_del_batch" class="btn btn-sm btn-danger hidden">删除本批</button>
         </div>
-        <div class="scroll-y flex-1 overflow-x-auto">
+
+        <div id="pane_results" class="scroll-y flex-1 hidden"></div>
+
+        <div id="pane_plans" class="scroll-y flex-1 overflow-x-auto">
           <table class="tb">
             <thead class="sticky top-0 bg-white z-10">
               <tr>
@@ -225,7 +275,7 @@
       <!-- 开抢 -->
       <div class="card shrink-0">
         <div class="hd px-4 h-12 flex items-center gap-2">
-          <h2 class="text-[13px] font-semibold">开抢</h2>
+          <h2 class="text-[13px] font-semibold">④ 开抢</h2>
           <span class="text-xs" style="color:var(--ink-3)">所有账号同时开抢，各按自己的配置</span>
         </div>
 
@@ -266,6 +316,7 @@
               <span>有人抢到就停掉其他人</span>
             </label>
             <div class="flex-1"></div>
+            <button onclick="runPreflight()" id="btn_preflight" class="btn">开抢前自检</button>
             <button onclick="grabTickets(false)" id="btn_grab_now" class="btn btn-primary">立即抢票</button>
             <button onclick="grabTickets(true)" id="btn_grab_scheduled" class="btn">定时抢票</button>
             <button onclick="toggleTicketPause()" id="btn_ticket_pause" data-state="running" style="display:none" class="btn">暂停</button>
@@ -274,28 +325,54 @@
         </div>
       </div>
 
-      <!-- 战果：整个流程的产出。程序只锁单不付款，这里每一条都对应一个等着人去付的订单。
-           不随启动清空，要清只能按批次手动删。 -->
-      <div class="card shrink-0" id="results_card">
-        <div class="hd px-4 h-10 flex items-center justify-between shrink-0">
-          <div class="flex items-center gap-2">
-            <h2 class="text-[13px] font-semibold">战果</h2>
-            <span id="results_summary" class="text-xs" style="color:var(--ink-3)"></span>
-          </div>
-          <div class="flex items-center gap-2">
-            <select id="results_batch" onchange="renderResults()" class="inp" style="width:auto;max-width:260px;font-size:12px;padding:3px 8px">
-              <option value="">全部批次</option>
-            </select>
-            <button onclick="exportResults()" id="btn_export_results" class="btn btn-sm">导出 CSV</button>
-            <button onclick="deleteResultBatch()" id="btn_del_batch" class="btn btn-sm btn-danger">删除本批</button>
-          </div>
-        </div>
-        <!-- 高度跟着视口走：固定 260px 在 1366x768 这种笔记本上会把卡片顶出屏幕，
-             而整页是 overflow:hidden 的，顶出去就够不着了 -->
-        <div id="results_body" class="scroll-y" style="max-height:min(260px, 26vh)"></div>
-      </div>
     </section>
   </main>
+
+  <!-- CSV 导入预览。刻意做成两步：直接导入的话一个格式错误就可能污染整份数据，
+       而且事后不容易看出哪一行错了。 -->
+  <div id="import_modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4"
+       style="background:rgba(0,0,0,.35)">
+    <div class="card w-full max-w-2xl flex flex-col" style="border-radius:8px;max-height:80vh">
+      <div class="hd px-5 h-12 flex items-center justify-between shrink-0">
+        <h3 class="text-[13px] font-semibold">导入预览</h3>
+        <button onclick="closeImportModal()" class="btn btn-sm">✕</button>
+      </div>
+      <div class="px-5 py-3 shrink-0">
+        <div id="import_summary" class="text-[13px] font-semibold"></div>
+      </div>
+      <div id="import_rows" class="scroll-y px-5 flex-1"></div>
+      <div class="px-5 py-3 flex items-center gap-2 shrink-0" style="border-top:1px solid var(--line)">
+        <span class="text-xs" style="color:var(--ink-3)">CSV 里是明文密码，导入后建议删掉该文件</span>
+        <div class="flex-1"></div>
+        <button onclick="closeImportModal()" class="btn btn-sm">取消</button>
+        <button onclick="commitImport()" id="btn_commit_import" class="btn btn-sm btn-primary">确认导入</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 自检结果弹窗。不做成就地展开：整页锁死一屏（overflow:hidden），
+       在「开抢」卡片里展开内容会把卡片底部顶出视口，而且顶出去就够不着了。 -->
+  <div id="preflight_modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4"
+       style="background:rgba(0,0,0,.35)">
+    <div class="card w-full max-w-2xl flex flex-col" style="border-radius:8px;max-height:80vh">
+      <div class="hd px-5 h-12 flex items-center justify-between shrink-0">
+        <h3 class="text-[13px] font-semibold">开抢前自检</h3>
+        <button onclick="closePreflight()" class="btn btn-sm">✕</button>
+      </div>
+      <div class="px-5 py-3 shrink-0">
+        <div id="preflight_summary" class="text-[13px] font-semibold"></div>
+      </div>
+      <div id="preflight_rows" class="scroll-y px-5 flex-1"></div>
+      <div class="px-5 py-3 flex items-center gap-2 shrink-0" style="border-top:1px solid var(--line)">
+        <span class="text-xs" style="color:var(--ink-3)">检查是只读的，不会开新窗口、不会点购买</span>
+        <div class="flex-1"></div>
+        <button onclick="runPreflight()" class="btn btn-sm">重新检查</button>
+        <button onclick="closePreflight()" class="btn btn-sm btn-primary">知道了</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast-wrap" id="toast_wrap"></div>
 
   <!-- 抢票人弹窗 -->
   <div id="account_modal" class="fixed inset-0 z-40 hidden items-center justify-center p-4" style="background:rgba(0,0,0,.35)">
@@ -389,6 +466,17 @@
         box.appendChild(el);
       }
       if (atBottom) box.scrollTop = box.scrollHeight;
+    }
+
+    // 关键操作的即时反馈。同时写日志——日志仍然是完整流水，toast 只是让人看见。
+    function toast(message, level = "info") {
+      appendLog(message, level);
+      const wrap = document.getElementById("toast_wrap");
+      const el = document.createElement("div");
+      el.className = "toast" + (level === "error" ? " err" : level === "warning" ? " warn" : "");
+      el.textContent = message;
+      wrap.appendChild(el);
+      setTimeout(() => el.remove(), level === "error" ? 5000 : 3000);
     }
 
     function escapeHtml(t) { const d = document.createElement("div"); d.textContent = t == null ? "" : t; return d.innerHTML; }
@@ -532,7 +620,7 @@
             const label = `#${b.seq ?? "?"} ${b.name || "(未命名)"}` + (taken ? `（已被 ${taken.remark || taken.email} 占用）` : "");
             return `<option value="${escapeHtml(b.id)}"${taken ? " disabled" : ""}${a && a.browser_id === b.id ? " selected" : ""}>${escapeHtml(label)}</option>`;
           }).join("")
-        : '<option value="">先点左上角「窗口」加载列表</option>';
+        : '<option value="">未连接比特浏览器 — 见顶部提示</option>';
       const m = document.getElementById("account_modal");
       m.classList.remove("hidden"); m.classList.add("flex");
       document.getElementById("m_email").focus();
@@ -559,7 +647,7 @@
       btn.disabled = true; btn.textContent = "保存中…";
       fetch("/ticket/accounts/save", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
         .then(r => r.json()).then(d => {
-          if (d.code === 200) { closeAccountModal(); appendLog(editingId ? "抢票人已更新" : "抢票人已新增"); loadAccounts(); }
+          if (d.code === 200) { closeAccountModal(); toast(editingId ? "抢票人已更新" : "抢票人已新增"); loadAccounts(); }
           else { err.textContent = d.result || "保存失败"; err.classList.remove("hidden"); }
         }).catch(e => { err.textContent = e.message; err.classList.remove("hidden"); })
         .finally(() => { btn.disabled = false; btn.textContent = "保存"; });
@@ -628,7 +716,7 @@
       fetch("/ticket/accounts/delete_batch", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids })
       }).then(r => r.json()).then(d => {
-        appendLog(d.result, d.code === 200 ? "warning" : "error");
+        toast(d.result, d.code === 200 ? "warning" : "error");
         if (d.code === 200) {
           ids.forEach(id => delete loginStatus[id]);
           if (selectMode) toggleSelectMode();   // 删完退出选择模式
@@ -653,7 +741,7 @@
       fetch("/ticket/accounts/clear_login", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids })
       }).then(r => r.json()).then(d => {
-        appendLog(d.result, d.code === 200 ? "warning" : "error");
+        toast(d.result, d.code === 200 ? "warning" : "error");
         if (d.code === 200) ids.forEach(id => delete loginStatus[id]);
         renderAccounts();
       }).catch(e => appendLog(`清除登录态失败: ${e.message}`, "error"))
@@ -674,14 +762,30 @@
         .finally(() => { btn.disabled = false; btn.textContent = "刷新状态"; });
     }
 
+    // 比特浏览器连不上时把横幅亮出来。连不上是硬阻塞：没有窗口可选、
+    // 没法登录、没法抢票，所以必须在顶部说清楚，而不是在日志里打一行小字。
+    function setConnBanner(errMsg) {
+      const bar = document.getElementById("conn_banner");
+      bar.classList.toggle("hidden", !errMsg);
+      if (errMsg) document.getElementById("conn_banner_msg").textContent = errMsg;
+    }
+
     function loadBrowsers() {
       const btn = document.getElementById("btn_load_browsers");
       btn.disabled = true; btn.textContent = "…";
       return fetch("/ticket/browsers").then(r => r.json()).then(d => {
-        if (d.code === 200) { browsersCache = d.browsers || []; renderAccounts(); }
-        else appendLog(d.result, "error");
-      }).catch(e => appendLog(`加载窗口失败: ${e.message}`, "error"))
-        .finally(() => { btn.disabled = false; btn.textContent = "窗口"; });
+        if (d.code === 200) {
+          browsersCache = d.browsers || [];
+          setConnBanner(null);
+          renderAccounts();
+        } else {
+          setConnBanner(d.result || "请打开比特浏览器客户端并保持登录");
+          appendLog(d.result, "error");
+        }
+      }).catch(e => {
+        setConnBanner(e.message);
+        appendLog(`加载窗口失败: ${e.message}`, "error");
+      }).finally(() => { btn.disabled = false; btn.textContent = "窗口"; });
     }
 
     function loginAll() {
@@ -690,8 +794,8 @@
       fetch("/ticket/login_all", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ wait_captcha_seconds: 180 }) })
         .then(r => r.json()).then(d => {
           if (d.task_id) startLogPolling(d.task_id);
-          appendLog(d.result, d.code === 200 ? "info" : "error");
-        }).catch(e => appendLog(`一键登录失败: ${e.message}`, "error"))
+          toast(d.result, d.code === 200 ? "info" : "error");
+        }).catch(e => toast(`一键登录失败: ${e.message}`, "error"))
         .finally(() => { btn.disabled = false; btn.textContent = "一键启动并登录"; });
     }
 
@@ -704,14 +808,14 @@
 
     function parseEvent() {
       const url = document.getElementById("parse_event_url").value.trim();
-      if (!url) { appendLog("请填写活动链接或 projectId", "error"); return; }
+      if (!url) { toast("请填写活动链接或 projectId", "error"); return; }
       const btn = document.getElementById("btn_parse");
       btn.disabled = true; btn.textContent = "解析中…";
       fetch("/ticket/parse_event", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ event_url: url }) })
         .then(r => r.json()).then(d => {
-          appendLog(d.result, d.code === 200 ? "info" : "error");
+          toast(d.result, d.code === 200 ? "info" : "error");
           if (d.code === 200) { eventData = d.event || {}; renderEventBar(); renderPlans(); }
-        }).catch(e => appendLog(`解析失败: ${e.message}`, "error"))
+        }).catch(e => toast(`解析失败: ${e.message}`, "error"))
         .finally(() => { btn.disabled = false; btn.textContent = "解析"; });
     }
 
@@ -1038,6 +1142,103 @@
       document.getElementById("btn_ticket_stop").style.display = "none";
     }
 
+
+
+    // ---------- CSV 导入 ----------
+    let pendingCsv = null;
+
+    function onCsvPicked(input) {
+      const f = input.files && input.files[0];
+      input.value = "";           // 同一个文件连续选两次也要能触发 change
+      if (!f) return;
+      const reader = new FileReader();
+      reader.onload = () => { pendingCsv = reader.result; previewImport(); };
+      reader.onerror = () => toast("读取文件失败", "error");
+      // 用 UTF-8 读；Excel 存的 CSV 带 BOM，后端会剥掉
+      reader.readAsText(f, "utf-8");
+    }
+
+    function previewImport() {
+      fetch("/ticket/accounts/import", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ csv: pendingCsv, commit: false })
+      }).then(r => r.json()).then(d => {
+        if (d.code !== 200) { toast(d.result || "解析失败", "error"); return; }
+        document.getElementById("import_summary").textContent = d.summary;
+        document.getElementById("btn_commit_import").disabled = d.ok_count === 0;
+        document.getElementById("import_rows").innerHTML = d.rows.map(r => {
+          const bad = r.issues.length > 0;
+          return `<div class="py-1.5 text-xs flex items-start gap-2"
+                       style="border-bottom:1px solid var(--line-2)">
+            <span style="color:${bad ? '#b91c1c' : 'var(--ink-3)'};width:34px;flex:none">
+              ${bad ? "✕" : r.action}</span>
+            <div class="min-w-0 flex-1">
+              <span style="color:var(--ink)">${escapeHtml(r.remark || "(无备注)")}</span>
+              <span style="color:var(--ink-3)"> · ${escapeHtml(r.email || "(空)")}</span>
+              ${r.seq ? `<span style="color:var(--ink-3)"> · 窗口 ${escapeHtml(r.seq)}</span>` : ""}
+              ${bad ? `<div style="color:#b91c1c">第 ${r.line} 行：${r.issues.map(escapeHtml).join("；")}</div>` : ""}
+            </div>
+          </div>`;
+        }).join("");
+        document.getElementById("import_modal").classList.remove("hidden");
+      }).catch(e => toast(`解析失败: ${e.message}`, "error"));
+    }
+
+    function commitImport() {
+      const btn = document.getElementById("btn_commit_import");
+      btn.disabled = true; btn.textContent = "导入中…";
+      fetch("/ticket/accounts/import", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ csv: pendingCsv, commit: true })
+      }).then(r => r.json()).then(d => {
+        toast(d.result || "导入完成", d.code === 200 ? "info" : "error");
+        if (d.code === 200) { closeImportModal(); loadAccounts().then(loadPlans); }
+      }).catch(e => toast(`导入失败: ${e.message}`, "error"))
+        .finally(() => { btn.disabled = false; btn.textContent = "确认导入"; });
+    }
+
+    function closeImportModal() {
+      document.getElementById("import_modal").classList.add("hidden");
+      pendingCsv = null;
+    }
+
+    // 开抢前自检。最惨的失败模式是到了开抢那一秒才发现某个人没登录、
+    // 某个人的配置还是上个活动的——抢票循环里确实会检查，但那时候已经晚了。
+    // 提前十分钟点一下，有问题还来得及修。
+    function runPreflight() {
+      const btn = document.getElementById("btn_preflight");
+      btn.disabled = true; btn.textContent = "检查中…";
+      document.getElementById("preflight_summary").textContent = "正在检查每个抢票人…";
+      document.getElementById("preflight_rows").innerHTML = "";
+      document.getElementById("preflight_modal").classList.remove("hidden");
+
+      fetch("/ticket/preflight").then(r => r.json()).then(d => {
+        if (d.code !== 200) { toast(d.result || "自检失败", "error"); closePreflight(); return; }
+
+        const icon = { ok: "●", warn: "▲", error: "✕" };
+        const color = { ok: "var(--ink)", warn: "var(--ink-2)", error: "#b91c1c" };
+        document.getElementById("preflight_summary").textContent = d.summary;
+        document.getElementById("preflight_summary").style.color =
+          d.error_count ? "#b91c1c" : "var(--ink)";
+        document.getElementById("preflight_rows").innerHTML = d.items.map(it => `
+          <div class="flex items-start gap-2 py-1.5 text-xs" style="border-bottom:1px solid var(--line-2)">
+            <span style="color:${color[it.level]};font-size:10px;line-height:16px;width:12px;flex:none">${icon[it.level]}</span>
+            <div class="min-w-0 flex-1">
+              <span style="color:var(--ink)">${escapeHtml(it.label)}</span>
+              ${it.plan ? `<span style="color:var(--ink-3)"> · ${escapeHtml(it.plan)}</span>` : ""}
+              ${it.problems.length
+                ? `<div style="color:${color[it.level]}">${it.problems.map(escapeHtml).join("；")}</div>`
+                : `<span style="color:var(--ink-3)"> · 就绪</span>`}
+            </div>
+          </div>`).join("");
+      }).catch(e => { toast(`自检失败: ${e.message}`, "error"); closePreflight(); })
+        .finally(() => { btn.disabled = false; btn.textContent = "开抢前自检"; });
+    }
+
+    function closePreflight() {
+      document.getElementById("preflight_modal").classList.add("hidden");
+    }
+
     function grabTickets(scheduled) {
       const payload = {
         max_attempts: parseInt(document.getElementById("ticket_max_attempts").value) || 0,
@@ -1048,7 +1249,7 @@
       };
       if (scheduled) {
         const at = document.getElementById("ticket_start_at").value;
-        if (!at) { appendLog("请先设置开抢时间", "error"); return; }
+        if (!at) { toast("请先设置开抢时间", "error"); return; }
         payload.start_at = at;   // 已经是 YYYY-MM-DD HH:MM:SS，后端直接能解析
       }
       fetch("/ticket/do_grab", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
@@ -1057,8 +1258,8 @@
             currentTicketTaskId = d.task_id; startLogPolling(d.task_id);
             setTicketRunningButtons(false);
           }
-          appendLog(d.result, d.code === 200 ? "info" : "error");
-        }).catch(e => appendLog(`请求失败: ${e.message}`, "error"));
+          toast(d.result, d.code === 200 ? "info" : "error");
+        }).catch(e => toast(`请求失败: ${e.message}`, "error"));
     }
 
     function toggleTicketPause() {
@@ -1130,7 +1331,7 @@
 
     function renderResults() {
       const items = currentResultItems();
-      const body = document.getElementById("results_body");
+      const body = document.getElementById("pane_results");
       const pending = items.filter(i => i.status === "locked" || i.status === "manual");
 
       // 顶栏常驻提醒：待支付的单有时限，漏付就白抢
@@ -1141,6 +1342,10 @@
 
       document.getElementById("results_summary").textContent =
         items.length ? `共 ${items.length} 单，待处理 ${pending.length}` : "";
+
+      // 标签上的角标：人在「配置」标签页时也能看到有几单待处理
+      document.getElementById("tab_results_badge").textContent =
+        allPending ? ` ${allPending}` : (resultsData.items.length ? ` ${resultsData.items.length}` : "");
       document.getElementById("btn_export_results").disabled = items.length === 0;
       document.getElementById("btn_del_batch").disabled = !document.getElementById("results_batch").value;
 
@@ -1202,7 +1407,7 @@
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id, status })
       }).then(r => r.json()).then(d => {
-        appendLog(d.result, d.code === 200 ? "info" : "error");
+        toast(d.result, d.code === 200 ? "info" : "error");
         if (d.code === 200) loadResults();
       }).catch(e => appendLog(`标记失败: ${e.message}`, "error"));
     }
@@ -1224,14 +1429,31 @@
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ batch_id: bid })
       }).then(r => r.json()).then(d => {
-        appendLog(d.result, d.code === 200 ? "warning" : "error");
+        toast(d.result, d.code === 200 ? "warning" : "error");
         if (d.code === 200) { document.getElementById("results_batch").value = ""; loadResults(); }
       }).catch(e => appendLog(`删除失败: ${e.message}`, "error"));
     }
 
-    function scrollToResults() {
-      document.getElementById("results_card").scrollIntoView({ behavior: "smooth", block: "center" });
+    // 右栏「配置 / 战果」标签页切换。工具条上的控件也跟着切——
+    // 「应用到全部」在看战果时没有意义，「导出 CSV」在配置时也一样。
+    let rightTab = "plans";
+    function switchRightTab(tab) {
+      rightTab = tab;
+      const isPlans = tab === "plans";
+      document.getElementById("tab_plans").classList.toggle("tab-on", isPlans);
+      document.getElementById("tab_results").classList.toggle("tab-on", !isPlans);
+      document.getElementById("pane_plans").classList.toggle("hidden", !isPlans);
+      document.getElementById("pane_results").classList.toggle("hidden", isPlans);
+
+      ["plan_summary", "plan_save_state", "bulk_session", "btn_apply_bulk"]
+        .forEach(id => document.getElementById(id).classList.toggle("hidden", !isPlans));
+      ["results_summary", "results_batch", "btn_export_results", "btn_del_batch"]
+        .forEach(id => document.getElementById(id).classList.toggle("hidden", isPlans));
+      if (!isPlans) renderResults();
     }
+
+    // 顶栏「待处理 N」点了就切到战果标签页
+    function scrollToResults() { switchRightTab("results"); }
 
 
     // 刷新页面后接管仍在跑的抢票任务。

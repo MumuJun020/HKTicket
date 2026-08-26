@@ -106,7 +106,9 @@ async def grab_ticket_on_page(
 
     attempt = 0
     consecutive_failures = 0
-    restocking = False   # 上一轮是不是在蹲回流票
+    restocking = False        # 上一轮是不是在蹲回流票
+    restock_since = None      # 从什么时候开始蹲的，用来算降频档位
+    restock_stage_logged = None
     while True:
         attempt += 1
 
@@ -263,14 +265,23 @@ async def grab_ticket_on_page(
             # 不计入连续失败（否则会误触发限流退避，白白拉长轮询间隔），
             # 日志用 [COUNTDOWN] 前缀让前端原地刷新一行，不然蹲几小时会把日志刷爆。
             now = time.strftime("%H:%M:%S")
-            print(f"[COUNTDOWN] [{browser_id}] {e} · 已查 {attempt} 次 · 最近 {now}")
+            if restock_since is None:
+                restock_since = time.time()
+            waited = int(time.time() - restock_since)
+            print(
+                f"[COUNTDOWN] [{browser_id}] {e} · 已查 {attempt} 次 · "
+                f"已蹲 {waited // 60}分{waited % 60}秒 · 最近 {now}"
+            )
             consecutive_failures = 0
             restocking = True
 
         except Exception as e:
             print(f"[{browser_id}] 抢票尝试出错：{e}")
             consecutive_failures += 1
+            # 不再是"售罄等回流"的状态了，降频计时重来
             restocking = False
+            restock_since = None
+            restock_stage_logged = None
 
         # 限流退避。站点是按 IP 限流的，被限之后连站点自己的请求都会
         # ERR_CONNECTION_CLOSED，页面整个渲染不出来——这时候再密集重试
@@ -288,9 +299,25 @@ async def grab_ticket_on_page(
                 await asyncio.sleep(backoff)
                 continue
 
-        # 重试前随机等待，避免所有窗口同频请求过于规律
-        wait_time = random.uniform(retry_interval_min, retry_interval_max)
-        await asyncio.sleep(wait_time)
+        # 重试前随机等待，避免所有窗口同频请求过于规律。
+        # 蹲回流票时按 RESTOCK_STAGES 逐级降频，理由见该常量的说明。
+        lo, hi = retry_interval_min, retry_interval_max
+        if restocking and restock_since is not None:
+            waited = time.time() - restock_since
+            for idx, (until, s_lo, s_hi) in enumerate(RESTOCK_STAGES):
+                if until is None or waited < until:
+                    if s_lo is not None:
+                        lo, hi = s_lo, s_hi
+                    if restock_stage_logged != idx and idx > 0:
+                        print(
+                            f"[{browser_id}] 已蹲 {int(waited // 60)} 分钟，"
+                            f"轮询间隔调整为 {lo:.0f}~{hi:.0f} 秒"
+                            f"（回流票出现时刻随机，降频不影响抢中概率，可显著降低被限流风险）"
+                        )
+                        restock_stage_logged = idx
+                    break
+
+        await asyncio.sleep(random.uniform(lo, hi))
 
 
 # 确认订单页「已阅读并同意条款及细则和隐私政策」的勾选控件（实测）。
@@ -310,6 +337,25 @@ class WaitingForRestock(Exception):
 # 限流退避参数。
 # 站点按 IP 限流，触发后该窗口连正常浏览都不行（所有请求 ERR_CONNECTION_CLOSED）。
 # 实测密集请求几十次就会中招，所以连续失败到一定次数就要停下来确认是不是被限了。
+# 蹲回流票的阶梯降频。
+#
+# 为什么要分阶段：回流票不是均匀出现的。开票瞬间抢购失败释放的票集中在最初
+# 几分钟，之后是零星退票，出现时刻完全随机。所以密集轮询只在前期有意义，
+# 之后再密集也不会更早发现，白白增加请求量。
+#
+# 为什么必须做：蹲票走的是 WaitingForRestock 分支，那个分支会把
+# consecutive_failures 归零（售罄是正常状态不是故障），因此**限流退避对蹲票
+# 完全不生效**。不分阶段的话就是以 2~4 秒无限期轮询下去——蹲一晚上 8 小时
+# 约 8000 次请求。这个项目已经因为请求过密被站点封过一次 IP。
+# 分阶段后同样 8 小时约 600 次，抢中概率几乎不变，风控风险差一个数量级。
+#
+# 每档 (持续到第几秒, 间隔下限, 间隔上限)；超过最后一档就一直用最后一档。
+RESTOCK_STAGES = (
+    (120,   None, None),   # 前 2 分钟：用用户设的间隔（默认 2~4 秒）
+    (900,   8.0,  15.0),   # 2~15 分钟
+    (None,  30.0, 60.0),   # 15 分钟以后
+)
+
 RATE_LIMIT_FAILURE_THRESHOLD = 3   # 连续失败几次开始怀疑被限流
 RATE_LIMIT_BACKOFF_BASE = 15       # 首次退避秒数
 RATE_LIMIT_BACKOFF_MAX = 300       # 退避上限，5 分钟
