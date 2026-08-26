@@ -292,21 +292,89 @@ def delete_account():
         return jsonify(code=500, result=str(e)), 500
 
 
+# 导入表格时认哪些列名。第一行必须是表头，顺序随意，多余的列忽略。
+# 一个字段给多个别名，是因为这份表往往是别人给的，列名五花八门，
+# 强行要求"必须叫账号"只会让人反复改表。
+IMPORT_COLUMNS = {
+    "email": ("账号", "邮箱", "email", "Email", "帐号"),
+    "password": ("密码", "password", "Password"),
+    "remark": ("备注", "姓名", "名字", "remark", "Remark"),
+    "seq": ("窗口序号", "窗口", "序号", "seq"),
+    "member_code": ("会员码", "会员优先购票码", "优先购票码", "member_code"),
+}
+
+# 解码 CSV 时依次尝试的编码。
+# utf-8-sig 放第一位：Excel 存的 UTF-8 CSV 带 BOM，不剥掉第一个列名会变成
+# "\ufeff账号" 而匹配不上表头。
+# gbk 是**必须有**的一档：中文 Windows 的 Excel「另存为 CSV」默认就是 GBK，
+# 不是 UTF-8，按 UTF-8 读会整片乱码，而且乱码之后报的错是"缺少必需的列"，
+# 完全看不出真正原因。big5 兜港台环境。
+CSV_ENCODINGS = ("utf-8-sig", "utf-8", "gbk", "big5")
+
+
+def _decode_csv_bytes(raw: bytes):
+    """把 CSV 字节按常见编码依次尝试解码，返回 (文本, 用的编码)。"""
+    for enc in CSV_ENCODINGS:
+        try:
+            return raw.decode(enc), enc
+        except UnicodeDecodeError:
+            continue
+    # 全都失败就用 utf-8 忽略错误，至少让用户看到部分内容而不是一个裸异常
+    return raw.decode("utf-8", errors="replace"), "utf-8(有无法识别的字符)"
+
+
+def _rows_from_xlsx(raw: bytes):
+    """读 .xlsx 的第一个工作表，返回 (表头列表, 数据行字典列表)。"""
+    import io
+
+    from openpyxl import load_workbook
+
+    # read_only + data_only：只读取值，不要公式，也不加载样式，省内存也快
+    wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+    ws = wb[wb.sheetnames[0]]
+    rows = ws.iter_rows(values_only=True)
+
+    try:
+        header_row = next(rows)
+    except StopIteration:
+        return [], []
+
+    headers = [("" if h is None else str(h)).strip() for h in header_row]
+    out = []
+    # 带上工作表里的**真实行号**。跳过空行之后行号会错位，
+    # 报"第 3 行有问题"但用户在 Excel 里数到的是第 4 行，会去改错行。
+    for sheet_row, r in enumerate(rows, start=2):
+        # 整行都空的跳过。Excel 里删过内容的行会留下一堆 None，
+        # 不跳过的话导入预览里会冒出几十条"账号为空"的假错误
+        if all(c is None or str(c).strip() == "" for c in r):
+            continue
+        row = {
+            headers[i] if i < len(headers) else f"_{i}":
+                ("" if c is None else str(c).strip())
+            for i, c in enumerate(r)
+        }
+        row["__line__"] = sheet_row
+        out.append(row)
+    wb.close()
+    return headers, out
+
+
 @ticket.route("/accounts/import", methods=["post"])
 def import_accounts():
     """
-    从 CSV 批量导入抢票人。
+    从表格批量导入抢票人。支持 **.csv 和 .xlsx**。
 
-    请求体：{"csv": "<文件内容>", "commit": false}
-        commit=false（默认）只解析和校验，返回预览，**不写任何数据**
-        commit=true  真正写入
+    两种提交方式：
+        multipart/form-data，字段 file=<文件>，commit=true/false   （前端用这个）
+        application/json，{"csv": "<文本>", "commit": false}       （纯文本，便于脚本调用）
+
+    commit=false（默认）只解析和校验并返回预览，**不写任何数据**；true 才真正写入。
 
     为什么要两步：直接导入的话，一个格式错误就可能污染整份数据，而且人事后
     不容易发现哪一行错了。先给出"将新增 N 个、更新 M 个、哪几行有问题"，
     看清楚再决定。
 
-    列名（第一行必须是表头，顺序随意，多余的列忽略）：
-        备注, 账号, 密码, 窗口序号
+    列名见 IMPORT_COLUMNS，第一行必须是表头，顺序随意，多余的列忽略。
     窗口用**序号**而不是 ID：ID 是 32 位十六进制，人没法手填；
     序号就是比特浏览器界面上显示的那个数字。
     """
@@ -314,35 +382,69 @@ def import_accounts():
     import io
 
     try:
-        body = request.json or {}
-        raw = body.get("csv") or ""
-        commit = bool(body.get("commit"))
-        if not raw.strip():
-            return jsonify(code=400, result="文件是空的"), 400
+        commit = False
+        rows_raw = None
+        headers = []
+        source_note = ""
 
-        # utf-8-sig：Excel 导出的 CSV 带 BOM，不剥掉的话第一个列名会变成
-        # "\ufeff备注"，导致表头匹配不上
-        if raw.startswith("\ufeff"):
-            raw = raw[1:]
+        upload = request.files.get("file")
+        if upload is not None:
+            commit = (request.form.get("commit") or "").lower() in ("1", "true", "yes")
+            raw = upload.read()
+            if not raw:
+                return jsonify(code=400, result="文件是空的"), 400
+            name = (upload.filename or "").lower()
 
-        reader = csv.DictReader(io.StringIO(raw))
-        if not reader.fieldnames:
+            if name.endswith((".xlsx", ".xlsm")):
+                headers, rows_raw = _rows_from_xlsx(raw)
+                source_note = "Excel"
+            elif name.endswith(".xls"):
+                # 旧的 .xls 是完全不同的二进制格式，openpyxl 读不了，
+                # 与其抛一个看不懂的异常，不如直接说清楚该怎么办
+                return (
+                    jsonify(code=400,
+                            result="不支持旧版 .xls 格式，请在 Excel 里另存为 .xlsx 或 .csv"),
+                    400,
+                )
+            else:
+                text, enc = _decode_csv_bytes(raw)
+                reader = csv.DictReader(io.StringIO(text))
+                headers = [(h or "").strip() for h in (reader.fieldnames or [])]
+                rows_raw = list(reader)
+                source_note = f"CSV（{enc}）"
+        else:
+            body = request.json or {}
+            commit = bool(body.get("commit"))
+            text = body.get("csv") or ""
+            if not text.strip():
+                return jsonify(code=400, result="文件是空的"), 400
+            if text.startswith("\ufeff"):
+                text = text[1:]
+            reader = csv.DictReader(io.StringIO(text))
+            headers = [(h or "").strip() for h in (reader.fieldnames or [])]
+            rows_raw = list(reader)
+            source_note = "CSV"
+
+        if not headers:
             return jsonify(code=400, result="读不出表头，请确认第一行是列名"), 400
 
-        headers = {(h or "").strip(): h for h in reader.fieldnames}
+        header_map = {h: h for h in headers}
 
-        def col(row, *names):
-            for n in names:
-                if n in headers:
-                    return (row.get(headers[n]) or "").strip()
+        def col(row, key):
+            for n in IMPORT_COLUMNS[key]:
+                if n in header_map:
+                    v = row.get(header_map[n])
+                    return ("" if v is None else str(v)).strip()
             return ""
 
-        missing = [n for n in ("账号",) if n not in headers]
-        if missing:
+        # 账号列必须有，但**任何一个别名都算数**。
+        # 早先这里写死只认"账号"，而取值时又接受"邮箱"，
+        # 结果用「邮箱」当表头的表会被误判成缺列。
+        if not any(n in header_map for n in IMPORT_COLUMNS["email"]):
             return (
                 jsonify(code=400,
-                        result=f"缺少必需的列：{'、'.join(missing)}。"
-                               f"当前表头是：{'、'.join(reader.fieldnames)}"),
+                        result=f"缺少账号列（列名可以是：{'、'.join(IMPORT_COLUMNS['email'][:3])}）。"
+                               f"当前表头是：{'、'.join(headers)}"),
                 400,
             )
 
@@ -358,19 +460,25 @@ def import_accounts():
 
         existing = store.get_accounts()
         by_email = {a["email"].lower(): a for a in existing}
-        # 已被占用的窗口（排除同邮箱的本人，那是更新不是冲突）
         taken = {a.get("browser_id"): a for a in existing if a.get("browser_id")}
 
-        rows = []
+        parsed = []
         seen_emails = set()
         seen_seqs = {}
         ok_count = new_count = update_count = 0
 
-        for i, row in enumerate(reader, start=2):   # 第 1 行是表头
-            email = col(row, "账号", "邮箱", "email")
-            password = col(row, "密码", "password")
-            remark = col(row, "备注", "姓名", "remark")
-            seq = col(row, "窗口序号", "窗口", "seq")
+        for i, row in enumerate(rows_raw, start=2):   # 第 1 行是表头
+            # Excel 路径带了工作表真实行号（跳过空行会让顺序号错位）；
+            # CSV 路径没有空行跳过，顺序号就是行号
+            i = row.get("__line__", i)
+            email = col(row, "email")
+            password = col(row, "password")
+            remark = col(row, "remark")
+            seq = col(row, "seq")
+            member_code = col(row, "member_code")
+            # Excel 里数字列会读成 "3.0"，转成 "3" 才能和窗口序号对上
+            if seq.endswith(".0"):
+                seq = seq[:-2]
 
             issues = []
             if not email:
@@ -410,48 +518,48 @@ def import_accounts():
                 else:
                     new_count += 1
 
-            rows.append({
+            parsed.append({
                 "line": i, "email": email, "remark": remark, "seq": seq,
                 "has_password": bool(password),
+                "has_member_code": bool(member_code),
                 "action": "更新" if is_update else "新增",
                 "issues": issues,
+                "_payload": {
+                    "email": email, "password": password, "remark": remark,
+                    "browser_id": browser_id, "member_code": member_code,
+                    "id": by_email[email.lower()]["id"] if is_update else None,
+                },
             })
 
-        if not rows:
+        if not parsed:
             return jsonify(code=400, result="文件里没有数据行"), 400
 
         summary = f"将新增 {new_count} 人、更新 {update_count} 人"
-        bad = len(rows) - ok_count
+        bad = len(parsed) - ok_count
         if bad:
             summary += f"；{bad} 行有问题会被跳过"
+        if source_note:
+            summary += f"（来源：{source_note}）"
 
+        # 预览不回传 _payload，里面有明文密码，没必要过一趟前端
+        public = [{k: v for k, v in r.items() if k != "_payload"} for r in parsed]
         if not commit:
-            return jsonify(code=200, preview=True, rows=rows, summary=summary,
+            return jsonify(code=200, preview=True, rows=public, summary=summary,
                            ok_count=ok_count, bad_count=bad)
 
-        # 真正写入：只写没问题的行
         saved = 0
         errors = []
-        reader2 = csv.DictReader(io.StringIO(raw))
-        for i, row in enumerate(reader2, start=2):
-            meta = next((r for r in rows if r["line"] == i), None)
-            if not meta or meta["issues"]:
+        for r in parsed:
+            if r["issues"]:
                 continue
-            email = col(row, "账号", "邮箱", "email")
-            payload = {
-                "email": email,
-                "password": col(row, "密码", "password"),
-                "remark": col(row, "备注", "姓名", "remark"),
-                "browser_id": id_by_seq.get(col(row, "窗口序号", "窗口", "seq"), ""),
-            }
-            old = by_email.get(email.lower())
-            if old:
-                payload["id"] = old["id"]
+            payload = dict(r["_payload"])
+            if payload.get("id") is None:
+                payload.pop("id")
             try:
                 store.save_account(payload)
                 saved += 1
             except ValueError as e:
-                errors.append(f"第 {i} 行：{e}")
+                errors.append(f"第 {r['line']} 行：{e}")
 
         msg = f"已导入 {saved} 人"
         if bad:
