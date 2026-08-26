@@ -323,11 +323,11 @@ def accounts_template():
     import csv
     import io
 
-    headers = ["备注", "账号", "密码", "窗口序号", "会员码"]
+    headers = ["备注", "账号", "密码", "窗口", "会员码"]
     samples = [
         ["张三", "zhang@example.com", "密码1", "3", ""],
         ["李四", "lisi@example.com", "密码2", "4", "MC-8891"],
-        ["留空自动分配窗口", "wang@example.com", "密码3", "", ""],
+        ["留空则自动分配", "wang@example.com", "密码3", "", ""],
     ]
     stamp = datetime.now().strftime("%Y%m%d")
 
@@ -378,7 +378,7 @@ IMPORT_COLUMNS = {
     "email": ("账号", "邮箱", "email", "Email", "帐号"),
     "password": ("密码", "password", "Password"),
     "remark": ("备注", "姓名", "名字", "remark", "Remark"),
-    "seq": ("窗口序号", "窗口", "序号", "seq"),
+    "seq": ("窗口", "窗口序号", "窗口名称", "序号", "seq"),
     "member_code": ("会员码", "会员优先购票码", "优先购票码", "member_code"),
 }
 
@@ -527,15 +527,44 @@ def import_accounts():
                 400,
             )
 
-        # 窗口序号 -> ID
-        id_by_seq = {}
+        # 窗口 -> ID。**名字和序号都认**。
+        #
+        # 比特浏览器的 seq 是它自己的序号，name 是用户起的名字，两个常常都是数字
+        # 而且对不上（实测 seq=4 的窗口名字叫「1」）。用户填表时想的几乎肯定是
+        # 自己起的名字，只认 seq 的话会绑到完全不同的窗口上——这是串号事故。
+        # 所以**先按名字匹配，再按序号**，两边都命中且指向不同窗口时报歧义让人自己定。
+        id_by_seq = {}      # 序号 -> id
+        id_by_name = {}     # 名字 -> id
+        win_label = {}      # id -> 给人看的说明
         conn_err = None
         try:
             for b in getAllBrowsers():
                 if b.get("seq") is not None:
                     id_by_seq[str(b["seq"])] = b["id"]
+                nm = (b.get("name") or "").strip()
+                if nm:
+                    id_by_name[nm] = b["id"]
+                win_label[b["id"]] = (
+                    f"窗口「{nm}」·序号{b.get('seq')}" if nm else f"序号{b.get('seq')}"
+                )
         except Exception as e:
             conn_err = str(e)
+
+        def resolve_window(value):
+            """把表格里填的窗口值解析成 (browser_id, 问题说明)。"""
+            by_name = id_by_name.get(value)
+            by_seq = id_by_seq.get(value)
+            if by_name and by_seq and by_name != by_seq:
+                return None, (
+                    f"「{value}」既是某个窗口的名字（{win_label[by_name]}），"
+                    f"又是另一个窗口的序号（{win_label[by_seq]}），无法确定要哪个。"
+                    f"建议把窗口列留空让程序自动分配，"
+                    f"或在比特浏览器里把窗口改成不会和序号混淆的名字"
+                )
+            hit = by_name or by_seq
+            if not hit:
+                return None, f"找不到窗口「{value}」（名字和序号都没匹配上）"
+            return hit, None
 
         existing = store.get_accounts()
         by_email = {a["email"].lower(): a for a in existing}
@@ -603,19 +632,20 @@ def import_accounts():
 
             if seq and not browser_id:
                 if conn_err:
-                    issues.append("连不上比特浏览器，无法校验窗口序号")
-                elif seq not in id_by_seq:
-                    issues.append(f"窗口序号 {seq} 不存在")
+                    issues.append("连不上比特浏览器，无法校验窗口")
                 else:
-                    browser_id = id_by_seq[seq]
-                    if seq in seen_seqs:
-                        issues.append(f"文件内窗口 {seq} 被分配了多次")
+                    browser_id, err = resolve_window(seq)
+                    if err:
+                        issues.append(err)
                     else:
-                        seen_seqs[seq] = email
-                    other = taken.get(browser_id)
-                    if other and other["email"].lower() != email.lower():
-                        who = other.get("remark") or other["email"]
-                        issues.append(f"窗口 {seq} 已绑定给「{who}」")
+                        if browser_id in seen_seqs:
+                            issues.append(f"文件内「{seq}」这个窗口被分配了多次")
+                        else:
+                            seen_seqs[browser_id] = email
+                        other = taken.get(browser_id)
+                        if other and other["email"].lower() != email.lower():
+                            who = other.get("remark") or other["email"]
+                            issues.append(f"{win_label.get(browser_id, seq)} 已绑定给「{who}」")
 
             if not issues:
                 ok_count += 1
@@ -625,10 +655,11 @@ def import_accounts():
                     new_count += 1
 
             if auto:
-                seen_seqs[seq] = email
+                seen_seqs[browser_id] = email
 
             parsed.append({
-                "line": i, "email": email, "remark": remark, "seq": seq,
+                "line": i, "email": email, "remark": remark,
+                "seq": win_label.get(browser_id, seq) if browser_id else seq,
                 "auto_window": auto,
                 "has_password": bool(password),
                 "has_member_code": bool(member_code),

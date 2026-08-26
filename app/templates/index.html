@@ -130,6 +130,11 @@
         <span id="status_summary" class="text-[13px]" style="color:var(--ink-2)">—</span>
         <button onclick="refreshLoginStatus()" id="btn_refresh_status" class="btn btn-sm"
           title="只查已打开的窗口，不会弹出新窗口">刷新状态</button>
+        <button onclick="loadBrowsers()" id="btn_load_browsers" class="btn btn-sm"
+          title="重新从比特浏览器拉取窗口列表">刷新窗口</button>
+        <span id="browser_count" class="text-xs" style="color:var(--ink-3)"></span>
+        <button onclick="autoAssignWindows()" id="btn_auto_assign" class="btn btn-sm"
+                title="给还没绑窗口的人自动分配空闲窗口">分配窗口</button>
       </div>
 
       <div class="flex-1"></div>
@@ -167,9 +172,7 @@
           </div>
           <div class="flex gap-1.5">
             <button onclick="toggleSelectMode()" id="btn_select_mode" class="btn btn-sm">选择</button>
-            <button onclick="loadBrowsers()" id="btn_load_browsers" class="btn btn-sm">窗口</button>
-            <button onclick="downloadTemplate()" class="btn btn-sm" title="下载标准格式模板，照着填即可">模板</button>
-            <button onclick="document.getElementById('csv_file').click()" class="btn btn-sm">导入</button>
+            <button onclick="openImportHelp()" class="btn btn-sm">导入</button>
             <input type="file" id="csv_file" accept=".csv,.xlsx,.xlsm,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" class="hidden" onchange="onCsvPicked(this)" />
             <button onclick="openAccountModal()" class="btn btn-sm btn-primary">新增</button>
           </div>
@@ -328,6 +331,43 @@
 
     </section>
   </main>
+
+  <!-- 导入引导。把「下载模板」和「选择文件」收在一起：
+       模板必须在选文件之前拿到，做成两个并列按钮的话卡片头会挤爆，
+       而且用户也说不清模板该放哪。收进来反而说得明白。 -->
+  <div id="import_help" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4"
+       style="background:rgba(0,0,0,.35)">
+    <div class="card w-full max-w-lg" style="border-radius:8px">
+      <div class="hd px-5 h-12 flex items-center justify-between">
+        <h3 class="text-[13px] font-semibold">批量导入抢票人</h3>
+        <button onclick="closeImportHelp()" class="btn btn-sm">✕</button>
+      </div>
+      <div class="px-5 py-4 text-[13px]" style="color:var(--ink-2)">
+        <p class="mb-3">支持 <b style="color:var(--ink)">.xlsx</b> 和 <b style="color:var(--ink)">.csv</b>，第一行必须是表头，列的顺序随意：</p>
+        <table class="tb mb-3" style="font-size:12px">
+          <thead><tr><th>备注</th><th>账号</th><th>密码</th><th>窗口</th><th>会员码</th></tr></thead>
+          <tbody>
+            <tr><td>张三</td><td>zhang@x.com</td><td>密码1</td><td>3</td><td></td></tr>
+            <tr><td>李四</td><td>lisi@x.com</td><td>密码2</td><td></td><td>MC-8891</td></tr>
+          </tbody>
+        </table>
+        <p class="text-xs" style="color:var(--ink-3)">
+          · <b style="color:var(--ink-2)">窗口列建议留空</b>，程序会自动分配空闲窗口<br>
+          · 要指定的话，填窗口<b style="color:var(--ink-2)">名字</b>或<b style="color:var(--ink-2)">序号</b>都认；
+            两者会混淆时会提示你<br>
+          · 编码不用管，UTF-8 / GBK 都能读<br>
+          · 账号已存在的会更新，不会重复创建
+        </p>
+      </div>
+      <div class="px-5 py-3 flex items-center gap-2" style="border-top:1px solid var(--line)">
+        <button onclick="downloadTemplate()" class="btn btn-sm">下载模板</button>
+        <div class="flex-1"></div>
+        <button onclick="closeImportHelp()" class="btn btn-sm">取消</button>
+        <button onclick="closeImportHelp(); document.getElementById('csv_file').click()"
+                class="btn btn-sm btn-primary">选择文件</button>
+      </div>
+    </div>
+  </div>
 
   <!-- CSV 导入预览。刻意做成两步：直接导入的话一个格式错误就可能污染整份数据，
        而且事后不容易看出哪一行错了。 -->
@@ -573,7 +613,7 @@
       accounts.forEach((a, i) => {
         const st = ST[(loginStatus[a.id] || {}).status] || ST.unknown;
         const win = browsersCache.find(b => b.id === a.browser_id);
-        const winLabel = win ? `#${win.seq} ${win.name}` : (a.browser_id ? "窗口未加载" : "未绑定");
+        const winLabel = win ? windowLabel(win) : (a.browser_id ? "窗口未加载" : "未绑定");
         const row = document.createElement("div");
         row.className = "px-4 py-2.5 group hover:bg-zinc-50";
         row.dataset.accId = a.id;
@@ -609,6 +649,16 @@
         : `<span style="color:var(--ink-3)">${accounts.length} 人 · 状态未知</span>`;
     }
 
+    // 窗口的显示文本。**必须把「名字」和「序号」区分清楚**：
+    // 比特浏览器的 seq 是它自己的序号，name 是你起的名字，两个常常都是数字
+    // 而且对不上（实测 seq=4 的窗口名字叫「1」）。只写「#4 1」的话
+    // 根本看不出哪个是哪个，而绑错窗口就是串号事故。
+    function windowLabel(b) {
+      if (!b) return "";
+      const name = b.name || b.remark || "";
+      return name ? `窗口「${name}」· 序号${b.seq ?? "?"}` : `序号${b.seq ?? "?"}（未命名）`;
+    }
+
     function openAccountModal(id = null) {
       editingId = id;
       const a = id ? accounts.find(x => x.id === id) : null;
@@ -622,7 +672,7 @@
       sel.innerHTML = browsersCache.length
         ? '<option value="">— 未绑定 —</option>' + browsersCache.map(b => {
             const taken = accounts.find(x => x.id !== id && x.browser_id === b.id);
-            const label = `#${b.seq ?? "?"} ${b.name || "(未命名)"}` + (taken ? `（已被 ${taken.remark || taken.email} 占用）` : "");
+            const label = windowLabel(b) + (taken ? `　—　已被 ${taken.remark || taken.email} 占用` : "");
             return `<option value="${escapeHtml(b.id)}"${taken ? " disabled" : ""}${a && a.browser_id === b.id ? " selected" : ""}>${escapeHtml(label)}</option>`;
           }).join("")
         : '<option value="">未连接比特浏览器 — 见顶部提示</option>';
@@ -783,6 +833,10 @@
         if (d.code === 200) {
           browsersCache = d.browsers || [];
           setConnBanner(null);
+          // 窗口总数常驻显示。窗口数决定了一轮能同时抢几个人，
+          // 是配置时最需要知道的一个数字，不该让人去比特浏览器里数。
+          document.getElementById("browser_count").textContent =
+            browsersCache.length ? `${browsersCache.length} 个窗口` : "";
           renderAccounts();
         } else {
           setConnBanner(d.result || "请打开比特浏览器客户端并保持登录");
@@ -791,7 +845,43 @@
       }).catch(e => {
         setConnBanner(e.message);
         appendLog(`加载窗口失败: ${e.message}`, "error");
-      }).finally(() => { btn.disabled = false; btn.textContent = "窗口"; });
+      }).finally(() => { btn.disabled = false; btn.textContent = "刷新窗口"; });
+    }
+
+    // 给还没绑窗口的人自动分配空闲窗口。手动一个个选很烦，而且容易选重——
+    // 选重就是串号事故（两个账号操作同一个浏览器，密码互相覆盖）。
+    function autoAssignWindows() {
+      if (!browsersCache.length) { toast("还没有窗口，请先确认比特浏览器已连接", "error"); return; }
+      const used = new Set(accounts.map(a => a.browser_id).filter(Boolean));
+      const free = browsersCache.filter(b => !used.has(b.id));
+      const need = accounts.filter(a => !a.browser_id);
+      if (!need.length) { toast("每个抢票人都已经绑好窗口了"); return; }
+      if (!free.length) { toast(`没有空闲窗口了（共 ${browsersCache.length} 个，全被占用）`, "error"); return; }
+
+      const n = Math.min(free.length, need.length);
+      const left = need.length - n;
+      if (!confirm(
+        `将给 ${n} 个人分配窗口：\n\n` +
+        need.slice(0, n).map((a, i) => `  ${a.remark || a.email} → ${windowLabel(free[i])}`).join("\n") +
+        (left ? `\n\n还有 ${left} 人没有窗口可分（窗口不够），可以分批抢。` : "")
+      )) return;
+
+      const btn = document.getElementById("btn_auto_assign");
+      btn.disabled = true; btn.textContent = "分配中…";
+      Promise.all(need.slice(0, n).map((a, i) =>
+        fetch("/ticket/accounts/save", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: a.id, email: a.email, password: "",
+                                 remark: a.remark, member_code: a.member_code || "",
+                                 browser_id: free[i].id })
+        }).then(r => r.json())
+      )).then(rs => {
+        const bad = rs.filter(r => r.code !== 200);
+        toast(bad.length ? `分配完成，${bad.length} 个失败：${bad[0].result}` : `已给 ${n} 个人分配窗口`,
+              bad.length ? "error" : "info");
+        loadAccounts().then(loadPlans);
+      }).catch(e => toast(`分配失败: ${e.message}`, "error"))
+        .finally(() => { btn.disabled = false; btn.textContent = "分配窗口"; });
     }
 
     function loginAll() {
@@ -1231,6 +1321,9 @@
 
     // 模板下载。给标准格式比在文档里描述列名有用得多——
     // 列名、顺序、示例行都摆在那，照着填就行。
+    function openImportHelp() { document.getElementById("import_help").classList.remove("hidden"); }
+    function closeImportHelp() { document.getElementById("import_help").classList.add("hidden"); }
+
     function downloadTemplate() {
       const xlsx = confirm(
         "下载导入模板\n\n确定 = Excel (.xlsx)\n取消 = CSV (.csv)"
