@@ -199,6 +199,15 @@ def _extract_event(data: dict, event_url: str) -> dict:
                     # 场次在售 + 该票档没售罄 才算可买。
                     # 不要用 canAddCart，那是购物车功能标志，跟可买性无关（见上方说明）
                     "available": session_on_sale and not pv.get("sellOut", False),
+                    # 需要会员码/权益码才能购买的票档（2026-08-26 在 NCT 127 实测）。
+                    #
+                    # 这类票档接口里照样返回，但**在选票页上根本不显示**——
+                    # 它们要先输入会员码解锁（页面 URL 上的 privilegeCodePrifixState
+                    # 就是这个开关）。不标出来的话用户会在配置里选中一个
+                    # "看得见但永远抢不到"的票档，抢票时一直报「未找到票档」，
+                    # 看着像程序坏了，其实是配置选了个走不通的。
+                    "need_member_code": bool(pv.get("isPermission"))
+                                        or pv.get("accessCodeMultipleState") is not None,
                     # 原始字段留着，出现判断分歧时方便核对
                     "raw_sell_out": bool(pv.get("sellOut", False)),
                     "raw_can_add_cart": bool(pv.get("canAddCart")),
@@ -258,6 +267,8 @@ def parse_event(event_url: str) -> dict:
         print(f"[解析]   {s['text']}{mark}")
         for t in s["tiers"]:
             tag = "" if t["available"] else " ← 售罄"
+            if t.get("need_member_code"):
+                tag += " ← 需会员码（选票页上不显示，普通流程抢不到）"
             print(f"[解析]     · {t['text']}{tag}")
 
     return event

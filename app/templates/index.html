@@ -844,7 +844,7 @@
             ${escapeHtml(s.text)}${s.sell_out ? ' <span class="text-[11px]">· 整场售罄</span>' : ""}
           </div>
           <div class="flex flex-wrap gap-1.5 mt-1.5">
-            ${s.tiers.map(t => `<span class="tag ${t.available ? "" : "tag-out"}">${escapeHtml(t.text)}</span>`).join("")}
+            ${s.tiers.map(t => `<span class="tag ${t.need_member_code ? "" : (t.available ? "" : "tag-out")}"${t.need_member_code ? ' style="border-style:dashed;color:var(--ink-3)" title="需会员码，选票页上不显示，无法自动抢"' : ""}>${escapeHtml(t.text)}${t.need_member_code ? " 🔒" : ""}</span>`).join("")}
           </div>
         </div>`).join("");
     }
@@ -902,7 +902,10 @@
         const fill = () => {
           const s = eventData.sessions.find(x => x.text === ss.value);
           ts.innerHTML = '<option value="">— 票档 —</option>' + (s ? s.tiers : []).map(t =>
-            `<option value="${escapeHtml(t.text)}"${t.text === plan.tier_text ? " selected" : ""}>${escapeHtml(t.text)}${t.available ? "" : " · 售罄"}</option>`).join("");
+            // 需会员码的票档禁选：它在选票页上根本不显示，选了只会一直报
+            // 「未找到票档」，看着像程序坏了。售罄的仍然可选——那是蹲回流票的正常用法，
+            // 两者性质完全不同：一个是暂时没票，一个是这条路走不通。
+            `<option value="${escapeHtml(t.text)}"${t.text === plan.tier_text ? " selected" : ""}${t.need_member_code ? " disabled" : ""}>${escapeHtml(t.text)}${t.need_member_code ? " · 需会员码，无法自动抢" : (t.available ? "" : " · 售罄")}</option>`).join("");
           markSoldOut(tr);
         };
         fill();

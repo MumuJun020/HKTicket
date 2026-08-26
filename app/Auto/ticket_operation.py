@@ -69,6 +69,41 @@ from ..utils.logger import task_state_manager
 # 单个浏览器窗口的抢票流程（骨架，需按目标活动页面结构补齐）
 # ------------------------------------------------------------------
 
+# 页面文本和接口文本对不齐的地方，匹配前必须先抹平（2026-08-26 在 NCT 127 实测）：
+#
+#   接口 priceName:  'B/标准门票 (企位)'          我们拼成 'B/标准门票 (企位) (HK$ 1799.00)'
+#   页面 innerText:  '站B/标准门票 (企位)\xa0(HK$ 1799.00)'
+#
+# 两处差异：
+#   1. 名称和价格之间页面用的是 &nbsp;（U+00A0），我们拼的是普通空格。
+#      只差这一个字符，整个活动 6 个票档一个都匹配不上。
+#   2. 页面在票档名前面挂了个角标 <span class="gaTag___rlXCy">站</span>，
+#      innerText 会把它一起拼进来。这是页面加的装饰，不属于票档名。
+#      用「包含」而不是「相等」来匹配就能容忍它。
+#
+# 所以匹配统一走：两边都把 \xa0 换成空格、压掉多余空白，再判断包含关系。
+def _normalize_text(t: str) -> str:
+    return " ".join((t or "").replace("\xa0", " ").split())
+
+
+async def _find_index_by_text(page: Page, selector: str, want: str):
+    """
+    在一组元素里按**规范化后的包含关系**找匹配项，返回 (下标, 页面上所有候选文本)。
+
+    没找到时返回 (-1, 候选列表)——候选列表是给错误日志用的：
+    只说"没找到"没法排查，把页面上实际有什么一并打出来，一眼就能看出是
+    文本对不上还是压根没这个票档。
+    """
+    texts = await page.eval_on_selector_all(
+        selector, "els => els.map(e => e.innerText)"
+    )
+    target = _normalize_text(want)
+    for i, t in enumerate(texts):
+        if target and target in _normalize_text(t):
+            return i, texts
+    return -1, texts
+
+
 async def grab_ticket_on_page(
     page: Page,
     browser_id: str,
@@ -173,13 +208,19 @@ async def grab_ticket_on_page(
                 raise RuntimeError("选票页未就绪")
 
             # 4) 选场次。页面没有默认选中项，且不选场次票档就不会渲染，所以这一步是必须的。
-            session_item = page.locator(
-                ".sessionListWrapper___gDIN1 .sessionList___al29_"
-            ).filter(has_text=session_text)
-            if await session_item.count() == 0:
+            #    同样走规范化匹配：票档那边已经证实页面会用 &nbsp;，
+            #    场次这边目前没遇到，但是同一类问题，不值得等它再咬一次。
+            s_idx, s_texts = await _find_index_by_text(
+                page, ".sessionListWrapper___gDIN1 .sessionList___al29_", session_text
+            )
+            if s_idx < 0:
+                avail = "、".join(_normalize_text(t) for t in s_texts) or "（页面上没有场次）"
                 print(f"[{browser_id}] 未找到匹配场次「{session_text}」，本次放弃")
+                print(f"[{browser_id}] 页面上可选的场次是：{avail}")
                 raise RuntimeError("场次未找到")
-            await session_item.first.click()
+            await page.locator(
+                ".sessionListWrapper___gDIN1 .sessionList___al29_"
+            ).nth(s_idx).click()
 
             # 点场次是登录态失效最先暴露的地方，这里再确认一次，
             # 免得后面对着登录页找票档，白白重试到超时
@@ -203,20 +244,32 @@ async def grab_ticket_on_page(
             #    **这里的"选不中"正是抢回流票的工作方式**：目标票档售罄时匹配不到，
             #    本轮直接结束、等间隔后重来；一旦有人退票、站点把 disableClass 摘掉，
             #    下一轮就能立刻点中并往下走。所以这不是异常，是预期中的轮询等待。
-            tier_item = page.locator(
-                ".ticketLevel___Q0XFF .levelItem___rPZ55:not(.disableClass___BDFqG)"
-            ).filter(has_text=tier_text)
-            if await tier_item.count() == 0:
+            #    匹配走 _find_index_by_text 而不是 Playwright 的 has_text：
+            #    页面文本里名称和价格之间是 &nbsp;，has_text 是逐字符比对，
+            #    差这一个字符就全都匹配不上（详见 _normalize_text 的说明）。
+            idx, all_texts = await _find_index_by_text(
+                page,
+                ".ticketLevel___Q0XFF .levelItem___rPZ55:not(.disableClass___BDFqG)",
+                tier_text,
+            )
+            if idx < 0:
                 # 区分"票档存在但暂时卖不了"和"压根没这个票档"：
-                # 前者继续等就行，后者是配置写错了，等到天荒地老也没用
-                any_tier = page.locator(
-                    ".ticketLevel___Q0XFF .levelItem___rPZ55"
-                ).filter(has_text=tier_text)
-                if await any_tier.count() > 0:
+                # 前者继续等就行，后者是配置选错了，等到天荒地老也没用
+                any_idx, _ = await _find_index_by_text(
+                    page, ".ticketLevel___Q0XFF .levelItem___rPZ55", tier_text
+                )
+                if any_idx >= 0:
                     raise WaitingForRestock(f"票档「{tier_text}」售罄中，继续蹲回流票")
-                print(f"[{browser_id}] 未找到票档「{tier_text}」，请检查票档文本是否写对")
+                # 把页面上实际有什么一并打出来。只说"没找到"没法排查，
+                # 列出候选就能一眼看出是文本对不上、还是这个票档压根不在售票列表里
+                # （比如会员预售票档要输会员码才会出现）。
+                avail = "、".join(_normalize_text(t) for t in all_texts) or "（页面上一个票档都没有）"
+                print(f"[{browser_id}] 未找到票档「{tier_text}」")
+                print(f"[{browser_id}] 页面上可选的票档是：{avail}")
                 raise RuntimeError("票档不存在")
-            await tier_item.first.click()
+            await page.locator(
+                ".ticketLevel___Q0XFF .levelItem___rPZ55:not(.disableClass___BDFqG)"
+            ).nth(idx).click()
             await asyncio.sleep(0.3)
 
             # 6) 设置购买数量。结构：.buyNum___a5xrK > span[减号, 当前数量, 加号]，

@@ -58,6 +58,8 @@ def do_grab():
         # 表现成"未找到匹配场次"，看着像选择器坏了，其实是配置串台了。
         valid_sessions = {s["text"] for s in event["sessions"]}
         valid_tiers = {t["text"] for s in event["sessions"] for t in s["tiers"]}
+        member_tiers = {t["text"] for s in event["sessions"]
+                        for t in s["tiers"] if t.get("need_member_code")}
 
         # 一个窗口只能有一个抢票人，否则并发抢票时多个任务会操作同一个浏览器
         used_windows = {}
@@ -108,6 +110,13 @@ def do_grab():
             if plan["tier_text"] not in valid_tiers:
                 problems.append(
                     f"{label} 配的票档「{plan['tier_text']}」不属于当前活动，请重新配置"
+                )
+                continue
+            if plan["tier_text"] in member_tiers:
+                # 会员预售票档要输会员码才会出现在选票页上，自动流程走不通。
+                # 不拦的话会一直报「未找到票档」空转，看着像程序坏了。
+                problems.append(
+                    f"{label} 配的是会员预售票档，需要会员码，普通流程抢不到，请换一个票档"
                 )
                 continue
             tasks.append(
@@ -853,6 +862,8 @@ def preflight():
 
         valid_sessions = {s["text"] for s in event.get("sessions", [])}
         valid_tiers = {t["text"] for s in event.get("sessions", []) for t in s["tiers"]}
+        member_tiers = {t["text"] for s in event.get("sessions", [])
+                        for t in s["tiers"] if t.get("need_member_code")}
 
         # 窗口是否还存在。比特浏览器连不上时拿不到，这种情况整体报错即可
         existing = None
@@ -914,6 +925,11 @@ def preflight():
                     level = "error"
                 if plan["tier_text"] not in valid_tiers:
                     problems.append("配的票档不属于当前活动")
+                    level = "error"
+                elif plan["tier_text"] in member_tiers:
+                    # 需会员码的票档在选票页上根本不显示，抢票时会一直报
+                    # 「未找到票档」，看着像程序坏了，其实是这条路走不通
+                    problems.append("配的是会员预售票档，需要会员码，普通流程抢不到")
                     level = "error"
 
             st = status_map.get(a["id"], {})
