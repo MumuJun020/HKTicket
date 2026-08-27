@@ -3,6 +3,7 @@ from playwright.async_api import async_playwright
 from ..Auto.ticket_operation import run as run_ticket
 from ..Auto.ticket_login import login_all, check_login_status
 from ..Auto.ticket_parser import parse_event
+from ..Auto.ticket_verify import verify_event
 from ..Auto import ticket_store as store
 from ..Auto.bit_api import getAllBrowsers, BitBrowserNotRunning, clearLoginStateBatch
 from ..utils.logger import LogCapture, log_manager, task_state_manager
@@ -1081,6 +1082,47 @@ def _run_sync(coro_factory, timeout=120):
     if "error" in box:
         raise box["error"]
     return box.get("data")
+
+
+@ticket.route("/verify_event", methods=["post"])
+def verify_event_route():
+    """
+    用页面上的真实内容核对接口解析结果。**只读，不下单。**
+
+    请求体：{"account_id": "...", "session_text": "...可选"}
+    不传 account_id 时用第一个已绑定窗口的抢票人。
+
+    这个接口存在的理由：接口解析和页面显示之间的接缝，是这个项目所有解析 bug
+    的发源地。与其反复推断"接口能不能预测页面"，不如开抢前当场比一次。
+    """
+    try:
+        body = request.json or {}
+        event = store.get_event()
+        if not event.get("sessions"):
+            return jsonify(code=400, result="还没有解析过活动，请先完成第 ② 步"), 400
+
+        accounts = store.get_accounts()
+        acc_id = body.get("account_id")
+        acc = next((a for a in accounts if a["id"] == acc_id), None) if acc_id else None
+        if acc is None:
+            acc = next((a for a in accounts if a.get("browser_id")), None)
+        if acc is None:
+            return jsonify(code=400, result="没有绑定了窗口的抢票人，无法打开页面核对"), 400
+
+        label = acc.get("remark") or acc.get("email")
+        data = _run_sync(
+            lambda pw: verify_event(
+                pw, acc["browser_id"], event,
+                session_text=body.get("session_text"), label=label,
+            ),
+            timeout=120,
+        )
+        data["account_label"] = label
+        return jsonify(code=200, **data)
+    except TimeoutError:
+        return jsonify(code=500, result="核对超时，请确认窗口能正常打开活动页"), 500
+    except Exception as e:
+        return jsonify(code=500, result=str(e)), 500
 
 
 @ticket.route("/preflight", methods=["get"])

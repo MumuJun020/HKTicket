@@ -194,11 +194,18 @@ def _extract_event(data: dict, event_url: str) -> dict:
         # 现在只过滤**确定是包装层**的那种：带 childPriceIds 的是父项，
         # 它在页面上不单独出现（页面显示子项，数量区才显示父项名字）。
         # 这条规则对上下两份快照都成立。
-        wrapper_ids = {
-            str(pv.get("priceId"))
-            for pv in ev.get("priceVoList") or []
-            if pv.get("childPriceIds")
-        }
+        wrapper_ids = set()
+        # 被"带门禁的父项"引用的普通档 —— 选中它们点「下一步」会弹会员码。
+        # 门禁信息挂在**父项**上（accessCodeMultipleState），普通档自己是 None，
+        # 而父项又会被过滤掉，所以必须在过滤前先把这层关系记下来。
+        gated_ids = set()
+        for pv in ev.get("priceVoList") or []:
+            children = pv.get("childPriceIds")
+            if not children:
+                continue
+            wrapper_ids.add(str(pv.get("priceId")))
+            if pv.get("accessCodeMultipleState") is not None:
+                gated_ids.update(str(c) for c in children)
 
         # 场次是否在售。saleState==3 表示整场停售/售罄，此时票档说什么都不算数。
         sale_state = ev.get("saleState")
@@ -227,10 +234,32 @@ def _extract_event(data: dict, event_url: str) -> dict:
                     # 是不是"包装层"票档（带 childPriceIds 的父项），
                     # 这种在页面票档列表里不单独出现
                     "is_wrapper": str(pv.get("priceId")) in wrapper_ids,
-                    # 选中它点「下一步」会不会要求会员优先购票码。
-                    # isPermission 就是这个意思——两份快照都对得上：
-                    # 上午是会员档为 True，晚上预售进行中时普通档也变成 True。
-                    "need_member_code": bool(pv.get("isPermission")),
+                    # 选中它点「下一步」**可能**会要求会员优先购票码。
+                    #
+                    # ⚠️ 这是个**提示，不是判据**。判据只有一个：抢票时点完
+                    # 「下一步」看弹窗到底出不出现（ticket_operation 里做的）。
+                    #
+                    # 用 accessCodeMultipleState 而不是 isPermission。
+                    # isPermission 试过，是错的：
+                    #     会员预售配置期  会员档 True / 普通档 False
+                    #     公开发售中      **全部 True**（但页面上会员图标全消失、
+                    #                     根本不需要码）
+                    # 拿它当判据，公售期间会把每个票档都标成"需会员码"。
+                    #
+                    # 用 accessCodeMultipleState，两处都要看：
+                    #     自己带      —— 这一档本身有门禁
+                    #     被父项引用  —— 门禁挂在会员父项上（普通档自己是 None），
+                    #                  而父项会被过滤掉，所以要在过滤前反查
+                    # 对两份快照都对得上：
+                    #     会员预售配置期  6 个普通档被带门禁的父项引用 → True
+                    #                    （实测选中后点「下一步」确实弹会员码）
+                    #     公开发售中      无父项、自己也是 None → False
+                    #                    （实测页面上会员图标全消失）
+                    # 但它仍然只是"目前为止对得上"，所以只用来提示，不参与任何拦截。
+                    "need_member_code": (
+                        pv.get("accessCodeMultipleState") is not None
+                        or str(pv.get("priceId")) in gated_ids
+                    ),
                     # 原始字段留着，出现判断分歧时方便核对
                     "raw_sell_out": bool(pv.get("sellOut", False)),
                     "raw_can_add_cart": bool(pv.get("canAddCart")),

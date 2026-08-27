@@ -109,6 +109,9 @@ def case_会员预售父子():
     check("留下的都不含「会员预售」字样",
           all("会员预售" not in t["name"] for t in s["tiers"]), True)
     check("限购取到 eventOrderLimit", s["order_limit"], 2)
+    check("会员档存在时普通档标记需会员码",
+          all(t["need_member_code"] for t in s["tiers"]), True,
+          "靠 accessCodeMultipleState，不是 isPermission")
 
 
 def case_公开发售真实数据():
@@ -134,8 +137,13 @@ def case_公开发售真实数据():
         sold = [t for t in s["tiers"] if not t["available"]]
         check(f"「{s['text'][:14]}…」售罄的是 E 档",
               all("E/" in t["name"] for t in sold), True)
-        check(f"「{s['text'][:14]}…」都标了需会员码",
-              all(t["need_member_code"] for t in s["tiers"]), True)
+        # 公售期间不能标"需会员码"。这是同类错误的第三次：
+        # 先用 canAddCart 判可买性、再用 isPermission 判页面显示、
+        # 又用 isPermission 判会员码——每次都是拿一个字段在一份快照上推结论。
+        # 公售中 isPermission 全是 True，但页面上会员图标全消失、根本不用码。
+        check(f"「{s['text'][:14]}…」不标需会员码",
+              any(t["need_member_code"] for t in s["tiers"]), False,
+              "公售中 isPermission 仍为 True，但不需要会员码——不能用它判断")
 
 
 def case_安全网():

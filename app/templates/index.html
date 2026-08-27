@@ -218,6 +218,8 @@
           <input type="text" id="parse_event_url" class="inp flex-1 min-w-0"
             placeholder="活动详情页链接，或直接填 projectId" />
           <button onclick="parseEvent()" id="btn_parse" class="btn btn-primary">解析</button>
+          <button onclick="verifyEvent()" id="btn_verify" class="btn btn-sm"
+                  title="打开一个已登录的窗口，进选票页把页面上真实的票档和解析结果逐条比对（只读，不下单）">核对</button>
           <button onclick="toggleEventDetail()" class="btn btn-sm">明细</button>
         </div>
         <div class="px-4 py-3">
@@ -1334,6 +1336,41 @@
     function closeImportModal() {
       document.getElementById("import_modal").classList.add("hidden");
       pendingFile = null;
+    }
+
+    // 用页面上的真实内容核对解析结果。
+    // 接口解析和页面显示之间的接缝是这个项目所有解析 bug 的发源地——
+    // 与其反复推断"接口能不能预测页面"，不如开抢前当场比一次。
+    function verifyEvent() {
+      const btn = document.getElementById("btn_verify");
+      btn.disabled = true; btn.textContent = "核对中…";
+      fetch("/ticket/verify_event", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}"
+      }).then(r => r.json()).then(d => {
+        if (d.code !== 200) { toast(d.result || "核对失败", "error"); return; }
+        if (!d.ok && !d.matched) { toast(d.detail || "核对失败", "error"); return; }
+
+        const lines = [];
+        lines.push(`场次：${d.session_text}`);
+        lines.push(`接口 ${d.api_count} 个票档 · 页面 ${d.page_count} 个`);
+        if (d.missing_on_page && d.missing_on_page.length)
+          lines.push(`\n✕ 接口有、页面没有（配了也抢不到）：\n  ` + d.missing_on_page.join("\n  "));
+        if (d.extra_on_page && d.extra_on_page.length)
+          lines.push(`\n✕ 页面有、接口没有（漏配了可抢的票）：\n  ` + d.extra_on_page.join("\n  "));
+        if (d.state_mismatches && d.state_mismatches.length)
+          lines.push(`\n✕ 售罄判断对不上：\n  ` + d.state_mismatches.map(m =>
+            `${m.text}（接口说${m.api_available ? "可售" : "售罄"}，页面说${m.page_sold_out ? "售罄" : "可售"}）`).join("\n  "));
+        if (d.ok) lines.push(`\n● 完全一致，${d.matched.length} 个票档逐条对得上`);
+
+        const icons = (d.matched || []).filter(m => m.member_icon).length;
+        lines.push(icons ? `\n页面上 ${icons} 个票档带会员图标 → 需要会员优先购票码`
+                         : `\n页面上没有会员图标 → 当前不需要会员码`);
+
+        alert(lines.join("\n"));
+        toast(d.ok ? "解析结果与页面完全一致" : "解析结果与页面有出入，详见弹窗",
+              d.ok ? "info" : "error");
+      }).catch(e => toast(`核对失败: ${e.message}`, "error"))
+        .finally(() => { btn.disabled = false; btn.textContent = "核对"; });
     }
 
     // 开抢前自检。最惨的失败模式是到了开抢那一秒才发现某个人没登录、

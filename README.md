@@ -409,6 +409,21 @@ run.py                   入口，含启动清理
 
 票档级 `sellOut` 单独用也不够：整场 `saleState=3` 时，有的票档 `sellOut` 仍是 `false`，但一张都买不了。
 
+### 拿不准的时候，用「核对」按钮对着页面验，别推
+
+票务解析卡片上的「核对」按钮：打开一个已登录的窗口，进选票页，把页面上**真实显示**
+的票档和解析结果逐条比对，列出三类差异——
+
+    接口有、页面没有   配了也抢不到
+    页面有、接口没有   漏配了可以抢的票
+    售罄判断对不上     元素找得到但状态判反，抢票会白跑或错过
+
+**全程只读**，不调数量、不点「下一步」、不下单。
+
+这个按钮存在的理由：接口和页面的**接缝**是本项目所有解析 bug 的发源地。
+配置用的是接口给的文本，抢票拿它去页面上找元素，两边对不上就"抢不到"，
+而且表现得像"没票"。与其反复推断"接口能不能预测页面"，不如开抢前当场比一次。
+
 ### 接口票档 ≠ 页面票档，但只过滤"确定是包装层"的
 
 接口会返回页面上不显示的票档。**唯一可靠的识别特征是 `childPriceIds`**：
@@ -487,6 +502,7 @@ cookie 和 cache 两个都要清：cookie 里是会话，但站点在 localStora
 | GET | `/ticket/accounts/template` | 下载导入模板（`?fmt=xlsx` 给 Excel） |
 | POST | `/ticket/accounts/import` | CSV / Excel 导入（commit=false 只预览） |
 | POST | `/ticket/accounts/clear_login` | 批量清除登录态 |
+| POST | `/ticket/verify_event` | 用页面内容核对解析结果（只读） |
 | GET | `/ticket/preflight` | 开抢前自检 |
 | GET | `/ticket/browsers` | 比特浏览器窗口列表 |
 | GET | `/ticket/login_status` | 各账号登录状态 |
