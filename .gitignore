@@ -36,3 +36,8 @@ log/*
 .idea/
 .vscode/
 .DS_Store
+
+# PyInstaller 打包产物
+build/
+dist/
+*.spec

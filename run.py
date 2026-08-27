@@ -1,4 +1,5 @@
 import os
+import sys
 
 from app import app
 from app.Auto import ticket_store as store
@@ -41,4 +42,18 @@ if __name__ == '__main__':
     # macOS 上 5000 端口默认被 ControlCenter(AirPlay) 占用，
     # 本地调试时用 PORT 环境变量换一个即可，默认值保持 5000 不影响 Docker 部署
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=True)
+
+    # 打包成单文件后**必须关掉 debug**。
+    #
+    # debug 模式的热重载会 fork 一个子进程、把监听 socket 的 fd 传过去，
+    # 而 PyInstaller 的启动引导跑不通这套：子进程起来就报
+    # OSError: Bad file descriptor，然后不断重启——每次重启还会重跑一遍
+    # 启动清理，把刚录进去的抢票人反复清空。
+    #
+    # 另外 Werkzeug 的调试器允许在页面上执行代码，而这个服务监听 0.0.0.0，
+    # 交付出去的程序开着 debug 本身也不合适。
+    debug = not getattr(sys, "frozen", False)
+    if not debug:
+        print(f"[启动] 控制台地址：http://localhost:{port}")
+        print("[启动] 关掉这个窗口程序就停了，抢票期间请保持它开着")
+    app.run(host="0.0.0.0", port=port, debug=debug)

@@ -202,6 +202,8 @@
       <div class="card flex flex-col min-h-0" style="flex:2 1 0">
         <div class="hd px-4 h-10 flex items-center justify-between shrink-0">
           <h2 class="text-[13px] font-semibold">日志</h2>
+          <button onclick="exportLog()" class="btn btn-sm" style="padding:2px 8px"
+                  title="把当前日志导出成 Markdown 文件">导出</button>
           <button onclick="clearLog()" class="btn btn-sm" style="padding:2px 8px">清空</button>
         </div>
         <div id="log" class="scroll-y flex-1 px-4 py-2.5 font-mono text-[11px] leading-[1.7]"></div>
@@ -526,6 +528,50 @@
     }
 
     function escapeHtml(t) { const d = document.createElement("div"); d.textContent = t == null ? "" : t; return d.innerHTML; }
+
+    // 把日志导出成 Markdown。
+    //
+    // 日志只存在浏览器的 DOM 里，刷新页面就没了——抢完之后想复盘"当时卡在哪一步"
+    // 完全查不了。导出成文件至少让这份记录能留下来、能发给别人看。
+    //
+    // 用 Markdown 而不是纯文本：抢票日志里有时间戳、账号名、状态，
+    // 用代码块包起来在任何地方（微信、issue、文档）贴出来都不会被重排。
+    function exportLog() {
+      const rows = [...document.querySelectorAll("#log > div")];
+      if (!rows.length) { toast("日志是空的，没什么可导出", "warning"); return; }
+
+      const ev = eventData && eventData.name ? eventData.name : "（未解析活动）";
+      const now = new Date();
+      const pad = n => String(n).padStart(2, "0");
+      const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+                    `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+
+      const lines = [
+        `# 抢票日志`,
+        ``,
+        `- 活动：${ev}`,
+        `- 导出时间：${now.toLocaleString("zh-CN")}`,
+        `- 抢票人：${accounts.length} 人`,
+        `- 日志条数：${rows.length}`,
+        ``,
+        "```log",
+        ...rows.map(r => r.innerText.replace(/\s+$/, "")),
+        "```",
+        ``,
+      ];
+
+      // 用 Blob + a[download]，不经过后端——日志本来就在前端，
+      // 传去后端再传回来纯属绕路
+      const blob = new Blob([lines.join("\n")], { type: "text/markdown;charset=utf-8" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `抢票日志_${stamp}.md`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      toast(`已导出 ${rows.length} 条日志`);
+    }
 
     function clearLog() {
       document.getElementById("log").innerHTML = "";

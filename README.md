@@ -555,6 +555,30 @@ macOS 上 5000 端口默认被 ControlCenter（AirPlay）占用，用 `PORT=5055
 
 ---
 
+## 打包成可执行文件
+
+```bash
+pip install pyinstaller && python build_exe.py
+```
+
+产物在 `dist/`，单文件、约 55 MB，带控制台窗口。
+
+> **必须在目标系统上打包。** PyInstaller 不能交叉编译 —— 要 Windows 的 `.exe`
+> 就得在 Windows 上跑这个脚本，在 macOS 上跑只会得到 macOS 可执行文件。
+
+打包版和源码版的区别：
+
+- `data/` 生成在**可执行文件旁边**（源码版在项目根）。可用 `HKTICKET_DATA_DIR` 覆盖
+- **debug 模式强制关闭**：热重载在 PyInstaller 下会崩溃循环，而且 Werkzeug 的
+  调试器允许在页面上执行代码，交付出去的程序不该开着
+
+拿到程序的人**仍然需要自己装比特浏览器**——那部分打包不进去。
+
+## 交接
+
+新接手的人先读 [HANDOFF.md](HANDOFF.md)：讲清楚了为什么这么写、踩过哪些坑、
+还差什么（尤其是**排队购票尚未实现**这个最大缺口）。
+
 ## 已知限制
 
 - 选择器只针对 hkticketing 写死，不做通用票务网站解析。

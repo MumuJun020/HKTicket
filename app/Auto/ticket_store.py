@@ -16,12 +16,33 @@
 """
 import json
 import os
+import sys
 import threading
 import uuid
 
-# 项目根目录 = 本文件往上三层（app/Auto/ticket_store.py -> app/Auto -> app -> 根）
-_BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-DATA_DIR = os.path.join(_BASE_DIR, "data")
+
+def _data_dir() -> str:
+    """
+    数据目录。
+
+    普通运行时是项目根的 data/（本文件往上三层）。
+
+    **打包成单文件可执行程序时必须放在可执行文件旁边**，不能用相对本文件的路径：
+    那时候代码被解压在系统临时目录里，程序一退出整个目录就被删了——
+    抢到的订单记录会跟着一起消失。所以打包后按 sys.executable 定位。
+
+    可以用环境变量 HKTICKET_DATA_DIR 覆盖（多份配置切换时有用）。
+    """
+    env = os.environ.get("HKTICKET_DATA_DIR")
+    if env:
+        return os.path.abspath(env)
+    if getattr(sys, "frozen", False):
+        return os.path.join(os.path.dirname(os.path.abspath(sys.executable)), "data")
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(root, "data")
+
+
+DATA_DIR = _data_dir()
 
 ACCOUNTS_FILE = os.path.join(DATA_DIR, "accounts.json")
 EVENT_FILE = os.path.join(DATA_DIR, "event.json")
