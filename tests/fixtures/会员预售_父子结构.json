@@ -1,0 +1,147 @@
+{
+  "projectName": "会员预售父子样本",
+  "projectToken": "t4",
+  "eventVoList": [
+    {
+      "eventCaption": "场次A",
+      "eventToken": "e",
+      "saleState": 2,
+      "sellOut": false,
+      "eventOrderLimit": 2,
+      "priceVoList": [
+        {
+          "priceId": "n0",
+          "priceName": "普通0",
+          "price": "1799",
+          "sellOut": false,
+          "canAddCart": null,
+          "isPermission": false,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "n1",
+          "priceName": "普通1",
+          "price": "1799",
+          "sellOut": false,
+          "canAddCart": null,
+          "isPermission": false,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "n2",
+          "priceName": "普通2",
+          "price": "1799",
+          "sellOut": false,
+          "canAddCart": null,
+          "isPermission": false,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "n3",
+          "priceName": "普通3",
+          "price": "1799",
+          "sellOut": false,
+          "canAddCart": null,
+          "isPermission": false,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "n4",
+          "priceName": "普通4",
+          "price": "1799",
+          "sellOut": false,
+          "canAddCart": null,
+          "isPermission": false,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "n5",
+          "priceName": "普通5",
+          "price": "1799",
+          "sellOut": false,
+          "canAddCart": null,
+          "isPermission": false,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "m0",
+          "priceName": "普通0 - NCTzen 127 Membership (GL) 会员预售",
+          "price": "1799",
+          "sellOut": false,
+          "canAddCart": null,
+          "isPermission": true,
+          "childPriceIds": [
+            "n0"
+          ],
+          "accessCodeMultipleState": 1
+        },
+        {
+          "priceId": "m1",
+          "priceName": "普通1 - NCTzen 127 Membership (GL) 会员预售",
+          "price": "1799",
+          "sellOut": false,
+          "canAddCart": null,
+          "isPermission": true,
+          "childPriceIds": [
+            "n1"
+          ],
+          "accessCodeMultipleState": 1
+        },
+        {
+          "priceId": "m2",
+          "priceName": "普通2 - NCTzen 127 Membership (GL) 会员预售",
+          "price": "1799",
+          "sellOut": false,
+          "canAddCart": null,
+          "isPermission": true,
+          "childPriceIds": [
+            "n2"
+          ],
+          "accessCodeMultipleState": 1
+        },
+        {
+          "priceId": "m3",
+          "priceName": "普通3 - NCTzen 127 Membership (GL) 会员预售",
+          "price": "1799",
+          "sellOut": false,
+          "canAddCart": null,
+          "isPermission": true,
+          "childPriceIds": [
+            "n3"
+          ],
+          "accessCodeMultipleState": 1
+        },
+        {
+          "priceId": "m4",
+          "priceName": "普通4 - NCTzen 127 Membership (GL) 会员预售",
+          "price": "1799",
+          "sellOut": false,
+          "canAddCart": null,
+          "isPermission": true,
+          "childPriceIds": [
+            "n4"
+          ],
+          "accessCodeMultipleState": 1
+        },
+        {
+          "priceId": "m5",
+          "priceName": "普通5 - NCTzen 127 Membership (GL) 会员预售",
+          "price": "1799",
+          "sellOut": false,
+          "canAddCart": null,
+          "isPermission": true,
+          "childPriceIds": [
+            "n5"
+          ],
+          "accessCodeMultipleState": 1
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,195 @@
+{
+  "projectName": "整场停售样本",
+  "projectToken": "t1",
+  "eventVoList": [
+    {
+      "eventCaption": "场次A",
+      "eventToken": "e",
+      "saleState": 3,
+      "sellOut": false,
+      "eventOrderLimit": 4,
+      "priceVoList": [
+        {
+          "priceId": "p0",
+          "priceName": "票档0",
+          "price": "500",
+          "sellOut": false,
+          "canAddCart": false,
+          "isPermission": false,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "p1",
+          "priceName": "票档1",
+          "price": "500",
+          "sellOut": false,
+          "canAddCart": false,
+          "isPermission": false,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "p2",
+          "priceName": "票档2",
+          "price": "500",
+          "sellOut": false,
+          "canAddCart": false,
+          "isPermission": false,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "p3",
+          "priceName": "票档3",
+          "price": "500",
+          "sellOut": false,
+          "canAddCart": false,
+          "isPermission": false,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "p4",
+          "priceName": "票档4",
+          "price": "500",
+          "sellOut": false,
+          "canAddCart": false,
+          "isPermission": false,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "p5",
+          "priceName": "票档5",
+          "price": "500",
+          "sellOut": true,
+          "canAddCart": false,
+          "isPermission": false,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "p6",
+          "priceName": "票档6",
+          "price": "500",
+          "sellOut": true,
+          "canAddCart": false,
+          "isPermission": false,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "p7",
+          "priceName": "票档7",
+          "price": "500",
+          "sellOut": true,
+          "canAddCart": false,
+          "isPermission": false,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "p8",
+          "priceName": "票档8",
+          "price": "500",
+          "sellOut": true,
+          "canAddCart": false,
+          "isPermission": false,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "p9",
+          "priceName": "票档9",
+          "price": "500",
+          "sellOut": true,
+          "canAddCart": false,
+          "isPermission": false,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "p10",
+          "priceName": "票档10",
+          "price": "500",
+          "sellOut": true,
+          "canAddCart": false,
+          "isPermission": false,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "p11",
+          "priceName": "票档11",
+          "price": "500",
+          "sellOut": true,
+          "canAddCart": false,
+          "isPermission": false,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "p12",
+          "priceName": "票档12",
+          "price": "500",
+          "sellOut": true,
+          "canAddCart": false,
+          "isPermission": false,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "p13",
+          "priceName": "票档13",
+          "price": "500",
+          "sellOut": true,
+          "canAddCart": false,
+          "isPermission": false,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "p14",
+          "priceName": "票档14",
+          "price": "500",
+          "sellOut": true,
+          "canAddCart": false,
+          "isPermission": false,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "p15",
+          "priceName": "票档15",
+          "price": "500",
+          "sellOut": true,
+          "canAddCart": false,
+          "isPermission": false,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "p16",
+          "priceName": "票档16",
+          "price": "500",
+          "sellOut": true,
+          "canAddCart": false,
+          "isPermission": false,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "p17",
+          "priceName": "票档17",
+          "price": "500",
+          "sellOut": true,
+          "canAddCart": false,
+          "isPermission": false,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        }
+      ]
+    }
+  ]
+}

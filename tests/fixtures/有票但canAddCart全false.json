@@ -1,0 +1,55 @@
+{
+  "projectName": "canAddCart 样本",
+  "projectToken": "t2",
+  "eventVoList": [
+    {
+      "eventCaption": "场次A",
+      "eventToken": "e",
+      "saleState": 2,
+      "sellOut": false,
+      "eventOrderLimit": 4,
+      "priceVoList": [
+        {
+          "priceId": "p0",
+          "priceName": "票档0",
+          "price": "800",
+          "sellOut": false,
+          "canAddCart": false,
+          "isPermission": false,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "p1",
+          "priceName": "票档1",
+          "price": "800",
+          "sellOut": false,
+          "canAddCart": false,
+          "isPermission": false,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "p2",
+          "priceName": "票档2",
+          "price": "800",
+          "sellOut": false,
+          "canAddCart": false,
+          "isPermission": false,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "p3",
+          "priceName": "票档3",
+          "price": "800",
+          "sellOut": false,
+          "canAddCart": false,
+          "isPermission": false,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        }
+      ]
+    }
+  ]
+}

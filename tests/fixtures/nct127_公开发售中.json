@@ -1,0 +1,146 @@
+{
+  "projectName": "NCT 127 5TH TOUR 'NEO CITY : HONG KONG - THE REDLINE'",
+  "projectToken": "50000001448009",
+  "minPrice": "899",
+  "maxPrice": "2199",
+  "eventVoList": [
+    {
+      "eventCaption": "2026年10月10日 (星期六) 晚上6时",
+      "eventToken": "60000001971020",
+      "saleState": 2,
+      "sellOut": false,
+      "eventOrderLimit": 4,
+      "priceVoList": [
+        {
+          "priceId": "70000002719266",
+          "priceName": "E/标准门票 (看台座位)",
+          "price": "899",
+          "sellOut": true,
+          "canAddCart": false,
+          "isPermission": true,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "70000002718862",
+          "priceName": "D/标准门票 (看台座位)",
+          "price": "1399",
+          "sellOut": false,
+          "canAddCart": false,
+          "isPermission": true,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "70000002787003",
+          "priceName": "C/部分视线受阻 (看台座位)",
+          "price": "1699",
+          "sellOut": false,
+          "canAddCart": false,
+          "isPermission": true,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "70000002737324",
+          "priceName": "B/标准门票 (企位)",
+          "price": "1799",
+          "sellOut": false,
+          "canAddCart": false,
+          "isPermission": true,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "70000002786001",
+          "priceName": "B/标准门票 (看台座位)",
+          "price": "1799",
+          "sellOut": false,
+          "canAddCart": false,
+          "isPermission": true,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "70000002718856",
+          "priceName": "A/VIP标准门票 (企位)",
+          "price": "2199",
+          "sellOut": false,
+          "canAddCart": false,
+          "isPermission": true,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        }
+      ]
+    },
+    {
+      "eventCaption": "2026年10月11日 (星期日) 晚上5时",
+      "eventToken": "60000001903109",
+      "saleState": 2,
+      "sellOut": false,
+      "eventOrderLimit": 4,
+      "priceVoList": [
+        {
+          "priceId": "70000002718876",
+          "priceName": "E/标准门票 (看台座位)",
+          "price": "899",
+          "sellOut": true,
+          "canAddCart": false,
+          "isPermission": true,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "70000002718887",
+          "priceName": "D/标准门票 (看台座位)",
+          "price": "1399",
+          "sellOut": false,
+          "canAddCart": false,
+          "isPermission": true,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "70000002718891",
+          "priceName": "C/部分视线受阻 (看台座位)",
+          "price": "1699",
+          "sellOut": false,
+          "canAddCart": false,
+          "isPermission": true,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "70000002718893",
+          "priceName": "B/标准门票 (看台座位)",
+          "price": "1799",
+          "sellOut": false,
+          "canAddCart": false,
+          "isPermission": true,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "70000002718918",
+          "priceName": "B/标准门票 (企位)",
+          "price": "1799",
+          "sellOut": false,
+          "canAddCart": false,
+          "isPermission": true,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        },
+        {
+          "priceId": "70000002718920",
+          "priceName": "A/VIP标准门票 (企位)",
+          "price": "2199",
+          "sellOut": false,
+          "canAddCart": false,
+          "isPermission": true,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        }
+      ]
+    }
+  ]
+}

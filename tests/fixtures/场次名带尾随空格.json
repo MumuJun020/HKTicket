@@ -1,0 +1,25 @@
+{
+  "projectName": "空格样本",
+  "projectToken": "t3",
+  "eventVoList": [
+    {
+      "eventCaption": "2026年9月4日 (星期五) 晚上7时  ",
+      "eventToken": "e",
+      "saleState": 2,
+      "sellOut": false,
+      "eventOrderLimit": 4,
+      "priceVoList": [
+        {
+          "priceId": "p0",
+          "priceName": "普通票",
+          "price": "105",
+          "sellOut": false,
+          "canAddCart": null,
+          "isPermission": false,
+          "childPriceIds": null,
+          "accessCodeMultipleState": null
+        }
+      ]
+    }
+  ]
+}
