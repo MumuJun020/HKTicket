@@ -6,7 +6,7 @@
     event.json          第一步解析留存的活动票务信息（场次、票档）
     plans.json          第二步配置：每个账号各自要抢哪个场次、哪个票档、几张
     window_owner.json   窗口归属：某个窗口上次登录的是谁
-    results.json        抢票战果：锁到的订单，**唯一不随启动清空的数据**
+    results.json        抢票结果：锁到的订单，**唯一不随启动清空的数据**
 
 安全提醒：accounts.json 里的密码是**明文**存储的。这是本地单机工具的取舍
 （登录时要把原文填进页面表单，做不了单向哈希）。因此：
@@ -284,7 +284,7 @@ def clear_window_owner(browser_id: str):
 
 
 # ------------------------------------------------------------------
-# 抢票战果
+# 抢票结果
 # ------------------------------------------------------------------
 #
 # 这是整个流程真正的产出，也是唯一**不随启动清空**的数据。
@@ -294,7 +294,7 @@ def clear_window_owner(browser_id: str):
 # 这些信息如果只存在于滚动过去的日志里，等于没有。漏付一单，前面全白做。
 #
 # 按「批次」分组：今天抢 A 活动、明天抢 B 活动，记录不该混在一起。
-# 每次发起抢票生成一个批次，战果按批次归档，导出可以只导某一批。
+# 每次发起抢票生成一个批次，抢票结果按批次归档，导出可以只导某一批。
 
 def _read_results() -> dict:
     data = _read(RESULTS_FILE, {})
@@ -358,7 +358,7 @@ def add_result(batch_id: str, item: dict) -> dict:
 
 
 def get_results() -> dict:
-    """返回全部战果，items 按锁单时间倒序（最新的在最前面）。"""
+    """返回全部抢票结果，items 按锁单时间倒序（最新的在最前面）。"""
     with _lock:
         data = _read_results()
     data["items"] = sorted(data["items"], key=lambda x: x.get("locked_at") or "", reverse=True)
@@ -366,7 +366,7 @@ def get_results() -> dict:
 
 
 def set_result_status(result_id: str, status: str) -> bool:
-    """标记某条战果的状态。付款是人工在浏览器里完成的，程序只能由人来标记。"""
+    """标记某条抢票结果的状态。付款是人工在浏览器里完成的，程序只能由人来标记。"""
     if status not in ("locked", "manual", "paid", "expired"):
         raise ValueError(f"未知状态：{status}")
     with _lock:
@@ -432,7 +432,7 @@ def reset_runtime_data(keep_event: bool = False) -> dict:
 
         # **results.json 刻意不清。** 它是整个流程的产出，不是运行时状态：
         # 锁到的订单还等着人去付款，清掉就等于把付款凭据丢了。
-        # 要清战果只能在界面上按批次手动删。
+        # 要清抢票结果只能在界面上按批次手动删。
 
         if keep_event:
             cleared["event"] = "保留"

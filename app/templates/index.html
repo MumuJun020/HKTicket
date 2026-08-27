@@ -139,9 +139,9 @@
 
       <div class="flex-1"></div>
       <!-- 待支付提醒：锁到的单有付款时限，漏付就白抢，所以放在顶栏常驻，
-           而不是埋在下面的战果卡片里等人自己去翻 -->
+           而不是埋在下面的抢票结果卡片里等人自己去翻 -->
       <button onclick="scrollToResults()" id="pending_badge" class="btn btn-sm hidden"
-              style="border-color:#b91c1c;color:#b91c1c" title="点击查看战果"></button>
+              style="border-color:#b91c1c;color:#b91c1c" title="点击查看抢票结果"></button>
       <button onclick="loginAll()" id="btn_login_all" class="btn btn-primary">一键启动并登录</button>
     </div>
   </header>
@@ -229,8 +229,8 @@
         </div>
       </div>
 
-      <!-- 配置 / 战果：合成一张卡用标签页切换。
-           这两块不需要同时看——配置是开抢前用的，战果是抢完后看的。
+      <!-- 配置 / 抢票结果：合成一张卡用标签页切换。
+           这两块不需要同时看——配置是开抢前用的，抢票结果是抢完后看的。
            拆成两张卡竖着堆的话，右栏在 1366x768 这类笔记本上会顶出视口，
            而整页是 overflow:hidden 的，顶出去就够不着了。
            合并之后高度跟只有配置时一样，整页仍然锁死一屏。 -->
@@ -239,7 +239,7 @@
           <button onclick="switchRightTab('plans')" id="tab_plans"
                   class="tab-btn tab-on text-[13px] font-semibold whitespace-nowrap">③ 配置每个人抢什么</button>
           <button onclick="switchRightTab('results')" id="tab_results"
-                  class="tab-btn text-[13px] font-semibold whitespace-nowrap">战果<span id="tab_results_badge"></span></button>
+                  class="tab-btn text-[13px] font-semibold whitespace-nowrap">抢票结果<span id="tab_results_badge"></span></button>
           <span id="plan_summary" class="text-xs" style="color:var(--ink-3)"></span>
           <span id="results_summary" class="text-xs hidden" style="color:var(--ink-3)"></span>
           <div class="flex-1"></div>
@@ -251,7 +251,7 @@
           </select>
           <button onclick="applyBulk()" id="btn_apply_bulk" class="btn btn-sm">应用到全部</button>
 
-          <!-- 战果态的工具 -->
+          <!-- 抢票结果态的工具 -->
           <select id="results_batch" onchange="renderResults()" class="inp hidden"
                   style="width:auto;max-width:240px;font-size:12px;padding:3px 8px">
             <option value="">全部批次</option>
@@ -546,9 +546,9 @@
             const e = d.data;
             if (isGlobalMode && currentTaskId && e.task_id === currentTaskId) return;
             appendLog(e.message, e.level);
-            // 抢中就立刻刷新战果。这是用户最想立刻看到的东西——
+            // 抢中就立刻刷新抢票结果。这是用户最想立刻看到的东西——
             // 锁到的单在等付款，不该让他刷页面才看得见。
-            if (e.message.includes("已记入战果")) loadResults();
+            if (e.message.includes("已记入抢票结果")) loadResults();
             if (e.message.includes("抢票完成，成功账号") || e.message.includes("抢票结束，所有账号均未成功")) {
               setTimeout(() => {
                 if (currentTicketTaskId) {
@@ -705,7 +705,14 @@
       btn.disabled = true; btn.textContent = "保存中…";
       fetch("/ticket/accounts/save", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
         .then(r => r.json()).then(d => {
-          if (d.code === 200) { closeAccountModal(); toast(editingId ? "抢票人已更新" : "抢票人已新增"); loadAccounts(); }
+          if (d.code === 200) {
+            // 必须先记下来再关弹窗：closeAccountModal() 会把 editingId 置空，
+            // 放在后面判断的话永远走「新增」分支，改资料也提示"新增"
+            const wasEdit = !!editingId;
+            closeAccountModal();
+            toast(wasEdit ? "更新成功" : "抢票人已新增");
+            loadAccounts();
+          }
           else { err.textContent = d.result || "保存失败"; err.classList.remove("hidden"); }
         }).catch(e => { err.textContent = e.message; err.classList.remove("hidden"); })
         .finally(() => { btn.disabled = false; btn.textContent = "保存"; });
@@ -1469,7 +1476,7 @@
     });
 
 
-    // ---------- 战果 ----------
+    // ---------- 抢票结果 ----------
     // 这是整个流程的产出：程序只锁单不付款，每条记录都是一个等着人去付的订单。
     let resultsData = { batches: {}, items: [] };
 
@@ -1605,8 +1612,8 @@
       }).catch(e => appendLog(`删除失败: ${e.message}`, "error"));
     }
 
-    // 右栏「配置 / 战果」标签页切换。工具条上的控件也跟着切——
-    // 「应用到全部」在看战果时没有意义，「导出 CSV」在配置时也一样。
+    // 右栏「配置 / 抢票结果」标签页切换。工具条上的控件也跟着切——
+    // 「应用到全部」在看抢票结果时没有意义，「导出 CSV」在配置时也一样。
     let rightTab = "plans";
     function switchRightTab(tab) {
       rightTab = tab;
@@ -1623,7 +1630,7 @@
       if (!isPlans) renderResults();
     }
 
-    // 顶栏「待处理 N」点了就切到战果标签页
+    // 顶栏「待处理 N」点了就切到抢票结果标签页
     function scrollToResults() { switchRightTab("results"); }
 
 

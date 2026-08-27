@@ -80,7 +80,7 @@ def do_grab():
                 )
             used_windows[bid] = label
 
-        # 窗口 ID -> 界面上显示的序号。战果记录里给的是序号，
+        # 窗口 ID -> 界面上显示的序号。抢票结果记录里给的是序号，
         # 因为付款时人要照着它去比特浏览器里找窗口，32 位的 ID 没法用。
         # 拿不到就算了（比特浏览器没开等），序号只是方便人看，
         # 不该因为它让整个抢票起不来。
@@ -128,7 +128,7 @@ def do_grab():
                 {
                     "browser_id": a["browser_id"],
                     "label": label,
-                    # 战果记录要用：付款时得知道去哪个号、哪个窗口里操作
+                    # 抢票结果记录要用：付款时得知道去哪个号、哪个窗口里操作
                     "email": a.get("email", ""),
                     "member_code": a.get("member_code", ""),
                     "browser_seq": seq_by_id.get(a["browser_id"]),
@@ -168,7 +168,7 @@ def do_grab():
             "retry_interval_max": float(body.get("retry_interval_max", 4.0)),
             # 抢到后是否自动勾选条款并点「确认订单」完成锁单（仍然不付款）
             "auto_confirm": bool(body.get("auto_confirm", False)),
-            # 本轮战果归到哪个批次下。今天抢 A 活动、明天抢 B 活动，
+            # 本轮抢票结果归到哪个批次下。今天抢 A 活动、明天抢 B 活动，
             # 记录不该混在一起，导出时也要能只导某一批。
             "batch_id": store.start_batch(event),
         }
@@ -767,7 +767,7 @@ def clear_login():
 
 
 # ------------------------------------------------------------------
-# 抢票战果
+# 抢票结果
 # ------------------------------------------------------------------
 
 # 状态在界面上的说法。后端存的是英文枚举，给人看要用人话。
@@ -782,7 +782,7 @@ STATUS_LABELS = {
 @ticket.route("/results", methods=["get"])
 def get_results():
     """
-    返回全部战果，按批次分组信息一并带出。
+    返回全部抢票结果，按批次分组信息一并带出。
 
     这是整个流程的产出：程序只锁单不付款，每条记录都对应一个等着人去付的订单。
     """
@@ -797,7 +797,7 @@ def get_results():
 
 @ticket.route("/results/status", methods=["post"])
 def set_result_status():
-    """标记一条战果的状态。付款是人工在浏览器里做的，程序没法自己知道，只能由人来标。"""
+    """标记一条抢票结果的状态。付款是人工在浏览器里做的，程序没法自己知道，只能由人来标。"""
     try:
         body = request.json or {}
         result_id = body.get("id")
@@ -815,7 +815,7 @@ def set_result_status():
 
 @ticket.route("/results/batch/delete", methods=["post"])
 def delete_result_batch():
-    """删掉一个批次的全部战果记录。"""
+    """删掉一个批次的全部抢票结果记录。"""
     try:
         batch_id = (request.json or {}).get("batch_id")
         if not batch_id:
@@ -829,7 +829,7 @@ def delete_result_batch():
 @ticket.route("/results/export.csv", methods=["get"])
 def export_results_csv():
     """
-    导出战果为 CSV。可选 ?batch_id=xxx 只导某一批。
+    导出抢票结果为 CSV。可选 ?batch_id=xxx 只导某一批。
 
     两个刻意的选择：
 
@@ -879,7 +879,7 @@ def export_results_csv():
             # 用 content_type 而不是 mimetype：mimetype 里带 charset 的话
             # Flask 会再追加一次，变成重复的 charset=utf-8; charset=utf-8
             content_type="text/csv; charset=utf-8",
-            headers=_attachment(f"抢票战果_{stamp}.csv"),
+            headers=_attachment(f"抢票结果_{stamp}.csv"),
         )
     except Exception as e:
         return jsonify(code=500, result=str(e)), 500

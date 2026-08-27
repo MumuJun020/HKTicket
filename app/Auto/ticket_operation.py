@@ -331,7 +331,7 @@ async def grab_ticket_on_page(
                     print(f"[{browser_id}] 未开启自动确认，已停在确认订单页，请手动完成")
                     locked = False
 
-                # 记战果。**锁没锁上都要记**：
+                # 记抢票结果。**锁没锁上都要记**：
                 # 锁上了要留订单号去付款；没锁上（条款没勾上、有必填项没填）
                 # 说明这一单已经占住位置、正等着人工去处理，
                 # 这种情况反而更需要提醒——不记的话用户根本不知道有单等着他。
@@ -457,7 +457,7 @@ async def extract_order_id(page: Page, label: str) -> Optional[str]:
     锁单成功后从支付页上把订单号抓下来。
 
     **抓不到不是错误。** 这个函数依赖页面结构和 URL 参数，站点一改版就可能失效；
-    但"这个人抢到了"这件事本身比订单号更重要——调用方必须在抓不到时照样记录战果，
+    但"这个人抢到了"这件事本身比订单号更重要——调用方必须在抓不到时照样记录抢票结果，
     只是订单号留空、提示用户去窗口里自己看。为这个抓不到就丢掉整条记录，
     等于让用户以为没抢到，直接错过付款。
 
@@ -488,7 +488,7 @@ async def extract_order_id(page: Page, label: str) -> Optional[str]:
         if m:
             return m.group(1)
     except Exception as e:
-        print(f"[{label}] 抓取订单号时出错（不影响战果记录）：{e}")
+        print(f"[{label}] 抓取订单号时出错（不影响抢票结果记录）：{e}")
     return None
 
 
@@ -788,7 +788,7 @@ async def _submit_privilege_code(page: Page, label: str, code: str) -> bool:
 
 async def _record_result(page: Page, label: str, obj: dict, locked: bool) -> None:
     """
-    把一次抢中落到战果记录里。
+    把一次抢中落到抢票结果记录里。
 
     这是整个流程唯一的产出留存点。程序只锁单不付款，锁到的订单在等人去付、
     而且有付款时限；十个号并发抢完，谁抢到了、哪场、订单号多少，
@@ -806,7 +806,7 @@ async def _record_result(page: Page, label: str, obj: dict, locked: bool) -> Non
         order_id = await extract_order_id(page, label) if locked else None
         if locked and not order_id:
             print(
-                f"[{label}] 锁单成功但没抓到订单号，已记录战果；"
+                f"[{label}] 锁单成功但没抓到订单号，已记录抢票结果；"
                 f"请到该窗口里查看订单号并尽快付款"
             )
 
@@ -826,12 +826,12 @@ async def _record_result(page: Page, label: str, obj: dict, locked: bool) -> Non
         )
         if not locked:
             store.set_result_status(rec["id"], "manual")
-            print(f"[{label}] 已记入战果：需人工完成确认订单")
+            print(f"[{label}] 已记入抢票结果：需人工完成确认订单")
         else:
             tail = f"，订单号 {order_id}" if order_id else ""
-            print(f"[{label}] 已记入战果：待支付{tail}")
+            print(f"[{label}] 已记入抢票结果：待支付{tail}")
     except Exception as e:
-        print(f"[{label}] 写战果记录失败（不影响抢票结果）：{e}")
+        print(f"[{label}] 写抢票结果记录失败（不影响抢票结果）：{e}")
 
 
 async def confirm_order(page: Page, label: str) -> bool:
@@ -1148,7 +1148,7 @@ async def run(
                 "session_text": t.get("session_text", ""),
                 "tier_text": t.get("tier_text", ""),
                 "quantity": int(t.get("quantity", 1)),
-                # 下面几项只用于战果记录，抢票流程本身不读
+                # 下面几项只用于抢票结果记录，抢票流程本身不读
                 "member_code": t.get("member_code", ""),
                 "account_label": t.get("label", ""),
                 "email": t.get("email", ""),
