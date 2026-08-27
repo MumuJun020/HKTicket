@@ -19,11 +19,16 @@ Flask 本地控制台 + 比特浏览器指纹窗口 + Playwright，做 hkticketi
 
 **只锁单，不付款；验证码人工过。** 这两条是设计边界，不要越过。
 
-跑起来（首次会自动建 venv 装依赖，之后直接启动，并自动开浏览器）：
+跑起来（会自动挑空闲端口、自动开浏览器）：
 
 ```bash
-./start.sh          # macOS / Linux；Windows 双击 start.bat
+source venv/bin/activate     # Windows: venv\Scripts\activate
+python run.py
 ```
+
+首次需要先建环境：`python3 -m venv venv && pip install -r requirements.txt`。
+交付给非技术用户时用 `start.sh` / `start.bat`（会自动建环境），
+或直接给打包好的可执行文件。
 
 改任何解析逻辑之前，先跑：
 

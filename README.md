@@ -44,35 +44,39 @@
 | 比特浏览器客户端 | 已安装、已登录、保持运行 | 程序通过 `127.0.0.1:54345` 与它通信 |
 | 比特浏览器窗口 | 每个抢票人 1 个 | 窗口数决定了一轮能同时抢几个人 |
 
-### 1.2 安装并启动
+### 1.2 安装
 
 ```bash
 git clone https://github.com/MumuJun020/HKTicket.git
+cd HKTicket
+python3 -m venv venv
+source venv/bin/activate          # Windows: venv\Scripts\activate
+pip install -r requirements.txt
 ```
-
-**macOS / Linux：**
-
-```bash
-cd HKTicket && ./start.sh
-```
-
-**Windows：** 双击 `start.bat`
-
-第一次跑会自动建虚拟环境、装依赖（一两分钟），之后直接启动。
-启动后**自动打开浏览器**，端口被占用会自动往后顺延 —— macOS 上 5000 默认被
-ControlCenter（AirPlay）占着，会自动换成 5001，不用再手动设 `PORT`。
 
 > Playwright 通过 CDP 连接比特浏览器**已有的**内核，
 > **不需要**执行 `playwright install` 再下载一份浏览器。
 
-想手动控制的话直接跑 `./venv/bin/python run.py`，支持这些环境变量：
+### 1.3 启动
 
-| 变量 | 默认 | 作用 |
+虚拟环境激活之后：
+
+```bash
+python run.py
+```
+
+会**自动挑空闲端口、自动打开浏览器**，不用再手动设 `PORT`
+（macOS 上 5000 默认被 ControlCenter/AirPlay 占着，会自动换成 5001）。
+
+| 环境变量 | 默认 | 作用 |
 |---|---|---|
 | `PORT` | 5000 | 起始端口，被占用时仍会自动往后找 |
 | `NO_BROWSER=1` | 关 | 不自动打开浏览器 |
 | `KEEP_DATA=1` | 关 | 跳过启动清理，沿用上一轮的抢票人和配置（调试用） |
 | `KEEP_EVENT=1` | 关 | 只保留上次解析的活动信息，抢票人照常清空 |
+
+> 交付给非技术用户时用 `start.sh` / `start.bat`——它们会自动建虚拟环境装依赖，
+> 双击即可。日常开发用上面的方式就行。
 
 ## 二、配置教程
 

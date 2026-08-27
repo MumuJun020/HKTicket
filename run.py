@@ -1,13 +1,13 @@
-"""
+r"""
 入口：一条命令启动抢票控制台。
 
+    source venv/bin/activate     # Windows: venv\Scripts\activate
     python run.py
 
-会自己挑一个空闲端口、自己把浏览器打开。不需要先设环境变量、
-也不需要在项目根目录下执行。
+会自己挑一个空闲端口、自己把浏览器打开，不用再手动设 PORT。
 
 可选环境变量：
-    PORT=5055        指定端口（被占用时会自动往后找）
+    PORT=5055        指定起始端口（被占用时会自动往后找）
     NO_BROWSER=1     不自动打开浏览器
     KEEP_DATA=1      启动时不清空上一轮数据（调试用）
     KEEP_EVENT=1     只保留上次解析的活动，抢票人照常清空
