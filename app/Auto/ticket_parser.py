@@ -175,25 +175,31 @@ def _extract_event(data: dict, event_url: str) -> dict:
     """
     sessions = []
     for ev in data.get("eventVoList") or []:
-        # 接口的票档列表和选票页显示的列表**不是一回事**，映射规则如下
-        # （2026-08-26 在 NCT 127 预售场实测，6/6 精确吻合）：
+        # 接口的票档列表和选票页显示的列表**不完全一致**，需要一点甄别。
         #
-        #   接口返回 12 个：6 个普通档（isPermission=False）
-        #                  + 6 个会员预售档（isPermission=True）
-        #   选票页只列出 6 个普通档，会员档一个都不显示。
+        # 2026-08-26 上午（会员预售配置好、尚未开卖）接口返回 12 个：
+        #     6 个 isPermission=False、childPriceIds=None       → 页面上显示
+        #     6 个 isPermission=True、childPriceIds=[对应的普通档] → 页面上不显示
+        #   会员档是"父"，childPriceIds 指向普通档。
         #
-        #   父子关系跟直觉是反的：**会员档是父，普通档是子**——
-        #   会员档的 childPriceIds 指向对应的普通档 priceId。
-        #   所以选中普通档之后，数量区显示的是那个会员档的名字。
+        # 同日晚上（会员预售进行中）接口只剩 6 个：
+        #     就是上午那 6 个普通档的 priceId，但 isPermission 全变成 True，
+        #     childPriceIds 全是 None，eventOrderLimit 从 2 变成 4。
         #
-        # 由此得到两条可以从接口直接算出来的结论，不需要打开页面：
-        #   1. 页面上能选到的票档 = isPermission != True 的那些
-        #   2. 某个普通档如果被会员档的 childPriceIds 引用，
-        #      选中它、点「下一步」时会弹出会员优先购票码输入框
-        gated_ids = set()
-        for pv in ev.get("priceVoList") or []:
-            if pv.get("isPermission") and pv.get("childPriceIds"):
-                gated_ids.update(str(x) for x in pv["childPriceIds"])
+        # 教训：**isPermission 不能用来判断"页面上显不显示"**。
+        # 早先写成「只保留 isPermission != True 的」，是拿上午一个快照推的规则，
+        # 晚上数据一变就把 6 个票档全过滤光了，界面上显示成"全部售罄"——
+        # 明明有票却报没票，比报错更糟糕。
+        #
+        # 现在只过滤**确定是包装层**的那种：带 childPriceIds 的是父项，
+        # 它在页面上不单独出现（页面显示子项，数量区才显示父项名字）。
+        # 这条规则对上下两份快照都成立。
+        wrapper_ids = {
+            str(pv.get("priceId"))
+            for pv in ev.get("priceVoList") or []
+            if pv.get("childPriceIds")
+        }
+
         # 场次是否在售。saleState==3 表示整场停售/售罄，此时票档说什么都不算数。
         sale_state = ev.get("saleState")
         session_on_sale = sale_state == 2 and not ev.get("sellOut", False)
@@ -218,21 +224,34 @@ def _extract_event(data: dict, event_url: str) -> dict:
                     # 场次在售 + 该票档没售罄 才算可买。
                     # 不要用 canAddCart，那是购物车功能标志，跟可买性无关（见上方说明）
                     "available": session_on_sale and not pv.get("sellOut", False),
-                    # 这一档在选票页的票档列表里显不显示（规则见上方说明）。
-                    # 不显示的不该出现在配置下拉里——选了也永远匹配不到。
-                    "on_page": not bool(pv.get("isPermission")),
-                    # 选中它点「下一步」会不会弹会员优先购票码输入框。
-                    # 有会员码就能过，没有就买不了这一场。
-                    "need_member_code": str(pv.get("priceId")) in gated_ids,
+                    # 是不是"包装层"票档（带 childPriceIds 的父项），
+                    # 这种在页面票档列表里不单独出现
+                    "is_wrapper": str(pv.get("priceId")) in wrapper_ids,
+                    # 选中它点「下一步」会不会要求会员优先购票码。
+                    # isPermission 就是这个意思——两份快照都对得上：
+                    # 上午是会员档为 True，晚上预售进行中时普通档也变成 True。
+                    "need_member_code": bool(pv.get("isPermission")),
                     # 原始字段留着，出现判断分歧时方便核对
                     "raw_sell_out": bool(pv.get("sellOut", False)),
                     "raw_can_add_cart": bool(pv.get("canAddCart")),
                 }
             )
 
-        # 只保留页面上真的会出现的票档。会员预售档（isPermission=True）
-        # 接口里有、页面上没有，留着只会让人配出一个永远抢不到的方案。
-        tiers = [t for t in tiers if t["on_page"]]
+        # 过滤掉包装层票档。
+        #
+        # **但绝不允许过滤到一个不剩。** 这是上一版最惨的教训：过滤规则一旦
+        # 跟站点新的数据形态对不上，就会把所有票档抹掉，界面显示"全部售罄"——
+        # 明明有票却报没票，用户完全无从判断是真没票还是程序坏了。
+        # 关于页面结构的启发式规则本来就可能过时，所以它只该做"锦上添花"，
+        # 不该有能力把一个健康的活动变成空的。宁可多显示几个，也不能一个不剩。
+        kept = [t for t in tiers if not t["is_wrapper"]]
+        if kept:
+            tiers = kept
+        elif tiers:
+            print(
+                f"[解析] 注意：{(ev.get('eventCaption') or '').strip()} 的票档"
+                f"按规则会被全部过滤掉，已改为全部保留（站点数据形态可能变了）"
+            )
 
         sessions.append(
             {
