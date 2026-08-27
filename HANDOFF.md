@@ -19,10 +19,10 @@ Flask 本地控制台 + 比特浏览器指纹窗口 + Playwright，做 hkticketi
 
 **只锁单，不付款；验证码人工过。** 这两条是设计边界，不要越过。
 
-跑起来：
+跑起来（首次会自动建 venv 装依赖，之后直接启动，并自动开浏览器）：
 
 ```bash
-cd HKTicket && PORT=5055 ./venv/bin/python run.py
+./start.sh          # macOS / Linux；Windows 双击 start.bat
 ```
 
 改任何解析逻辑之前，先跑：
